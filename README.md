@@ -1,117 +1,196 @@
 # pi-peloton
 
-Peer-to-peer collaboration for [Pi](https://pi.dev) agents, without taking over
-the human's prompt editor.
+Local peer messaging for [Pi](https://pi.dev) agents, without taking over the
+human's prompt editor.
 
-A peloton moves together and shares the effort. `pi-peloton` aims to let Pi agents
-do the same: discover peers, exchange messages, and coordinate work while humans
-continue using the normal terminal UI.
+**Status: experimental prototype.** The extension, Unix-socket transport, and
+automated tests now exist. The development target is **Pi 1.0.3 on Unix**, with
+Node.js 22.19 or newer. Other Pi versions and manual TUI behavior have not been
+verified. This is not a published or production-hardened package.
 
-**Status: design-stage repository.** This repository currently contains project
-intent and agent instructions, not a working extension. Interfaces below are
-proposals; there are no installation instructions yet.
+## Collaboration hypothesis
 
-## The experience
+Provide the channel; let the agents develop the collaboration. Peloton does not
+prescribe roles, handshakes, task states, or a build → review → fix workflow.
+Agents can ask questions, challenge assumptions, share discoveries, and divide
+work as useful, within existing permission boundaries.
 
-Tell your agent:
+The hypothesis is that low-friction communication during work lets agents catch
+mistakes and exchange context earlier, improving work quality compared with
+isolated implementation followed by sequential review. This is a hypothesis to
+test, not an established benefit or a claim about intrinsic model motivation.
 
-> Work with the agent in window 2 to complete this task.
+## Prepare peers separately
 
-The agent discovers the Pi instance in that tmux window and messages it through
-local IPC. Neither agent types into the other's prompt editor. Both humans can
-see the collaboration in their own transcripts.
+The human prepares each peer's session, model, and thinking level before
+collaboration. Peloton does not create/reset peer sessions, select their models,
+or change thinking levels. It does not simulate keystrokes, paste into editors,
+or submit unfinished human prompts. `pi.sendMessage()` treats `/new` as literal
+peer content, not an executable TUI command.
 
-Example presentation (illustrative, not implemented):
+## Development and installation
 
-```text
-┌─ PEER · SENT → window 2 / reviewer ───────────────────
-│ Please review the authentication changes.
-│ Focus on security; don't edit files yet.
-└─ Accepted by recipient · msg-017
+From this checkout:
 
-┌─ PEER · RECEIVED ← window 2 / reviewer ───────────────
-│ Found a missing expiry check in validateToken().
-│ I'll send the relevant locations next.
-└─ Queued as follow-up · msg-018
+```sh
+npm ci --ignore-scripts
+npm run check
+npm test
 ```
 
-Distinctive labels and formatting should make peer messages easy to distinguish
-from human prompts, assistant responses, and ordinary tool output.
+Host-provided Pi packages are peer dependencies, with Pi 1.0.3 versions also
+installed locally for development. npm reports upstream advisories in the pinned
+Pi development dependency graph (`minimatch` and `undici`); this does not patch
+or upgrade the user's Pi installation. Run `npm audit` for current details. Do
+not treat this prototype as a security boundary or published release.
 
-## Proposed interface
+To try the extension for one invocation without changing Pi settings:
 
-- `peer_list`: discover available Pi peers and their tmux locations.
-- `peer_send`: send a message to a peer, using a friendly target such as
-  `window 2` or an explicit peer/pane ID.
-- `/peloton`: show available peers to the human.
-- `/peer`: send a message manually without requiring the model to call a tool.
+```sh
+pi -e /absolute/path/to/pi-peloton
+```
 
-Tool schemas, command syntax, and message rendering will be finalized during
-implementation.
+To install deliberately into personal Pi settings:
 
-## Design direction
+```sh
+pi install /absolute/path/to/pi-peloton
+```
 
-### Keep the human editor untouched
+Local packages load directly from that path, without copying. Their dependency
+preparation is the checkout owner's responsibility. `--local` selects project
+settings instead. Start a new Pi process or use `/reload` to load it in an existing
+one. Installation was tested only in disposable settings, not the user's live
+configuration.
 
-A Pi extension receives messages over local IPC and injects them using Pi's
-extension APIs. Do not simulate keystrokes, paste into the editor, or submit a
-human's unfinished prompt.
+## Model-facing interface
 
-The initial transport is intended to be a private Unix-domain socket per Pi
-instance, with a local registry for peer discovery. tmux is the first addressing
-integration, not a permanent dependency of the messaging protocol.
+One tool, `peer_send`, targets the receiving **Pi process's PID**:
 
-### Resolve friendly names to stable identities
+```text
+peer_send(target=12345, content="Please review the changes.")
+peer_send(target=12345, content="That assumption is incorrect.", delivery="steer")
+peer_send(target=12345, content="Context for your next prompt.", delivery="nextTurn")
+```
 
-Map tmux session/window/pane locations to registered Pi instances. Interpret
-`window 2` relative to the sender's tmux session. Resolve to stable tmux pane IDs
-and explicit peer identities before sending; do not rely on window numbers
-remaining unchanged. Report ambiguity when a window contains multiple peers,
-rather than choosing one silently. A Pi process can also switch conversations,
-so delivery must validate the intended live session rather than reuse a stale
-registration.
+Tool arguments:
 
-### Deliver at appropriate boundaries
+| Argument | Meaning |
+|---|---|
+| `target` | Receiving Pi PID, a positive integer |
+| `content` | Nonblank message, at most 16 KiB in UTF-8 |
+| `delivery` | `followUp` (default), `steer`, or `nextTurn` |
+| `replyTo` | Optional message ID being answered |
 
-Routine messages use follow-up delivery: queue while the recipient is busy and
-start a turn when idle. Steering is an explicit option for urgent corrections,
-not the default. Consider a passive next-turn mode for messages that should not
-independently start work.
+Each instance displays its PID in the TUI status line. The human can supply it,
+or agents can find it using tmux and process-inspection tools. tmux's `pane_pid`
+often identifies a shell, not its Pi child; do not assume they are the same.
+There is no built-in peer listing or friendly window-name resolver.
 
-Received messages should be custom Pi messages with a recognizable peer type and
-sender metadata. Sent receipts should be rendered tool results or transcript-only
-entries, not additional inbound messages that trigger another turn.
+### Delivery
 
-### Make coordination visible and bounded
+| Mode | Pi options | Intended behavior |
+|---|---|---|
+| Follow-up | `deliverAs: "followUp", triggerTurn: true` | Wake when idle; queue until ongoing work finishes when busy |
+| Steering | `deliverAs: "steer", triggerTurn: true` | Wake when idle; deliver at Pi's supported turn/tool boundary when busy |
+| Passive | `deliverAs: "nextTurn"` | Wait for the next user prompt; do not independently start work |
 
-Include sender, recipient, message ID, and optional reply-to ID in each message.
-Distinguish recipient acceptance from model consumption, reply, and task completion.
-A transport acknowledgement must not claim that work is finished.
+`triggerTurn` is an internal per-call choice, not a public Peloton option or a
+global Pi setting. These semantics were checked against Pi 1.0.3 source and the
+extension's mapping is tested. Real model turns and busy delivery boundaries
+still require verification.
 
-Peer messages are attributed collaborator input, not human or system instructions.
-They do not grant permissions. Collaboration should have an explicit task and
-stopping condition, with safeguards against endless automatic replies.
+## Visible, attributed messages
 
-## Initial scope
+Received content is a custom `peloton.peer` message with an explicit collaborator
+prefix in model context, including sender PID and message ID. Metadata retains
+sender/recipient instance and conversation-generation identities, delivery mode,
+optional reply-to ID, recipient Pi session ID, and acceptance time.
 
-- Local, same-user peer discovery and messaging.
-- tmux window/pane addressing with explicit ambiguity handling.
-- Model-callable tools and human-facing commands.
-- Distinctive sent/received transcript rendering.
-- Follow-up delivery, explicit steering, and lifecycle cleanup.
-- Tests for routing, delivery, editor preservation, and failure handling.
+A transcript-only `peloton.status` entry displays accepted messages immediately,
+including passive or queued content. The custom message is rendered again when
+Pi records it into the conversation. Sent tool calls show content and direction;
+tool results retain the envelope, acceptance receipt, and sender session ID.
+Terminal controls and bidi overrides are escaped in peer text and renderers.
 
-Initially out of scope: remote/network messaging, replacing Pi's TUI, launching
-or supervising subagents, a shared task scheduler, and automatic coordination of
-concurrent file edits. Agents sharing a checkout must still agree on ownership of
-files and changes.
+Labels identify **SENT →** and **RECEIVED ←**, not just colors. Neither receipts
+nor status entries become additional incoming prompts. A tool receipt means only
+**accepted by the recipient**—not model consumption, response, or task completion.
+The extension does not generate automatic replies.
 
-## Contributing
+## Transport and identity
 
-Read [AGENTS.md](AGENTS.md) for implementation constraints and verification
-expectations. Start with a small vertical slice: two Pi instances exchange a
-message, both transcripts show it distinctly, and neither human editor changes.
+Each running instance listens on a private Unix-domain socket:
 
-Pi's upstream [extension documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md)
-and checked examples are the starting point. Verify APIs against the supported Pi
-version before implementing; no minimum version has been chosen yet.
+```text
+$XDG_RUNTIME_DIR/pi-peloton/<pi-pid>.sock
+```
+
+Without `XDG_RUNTIME_DIR`, the fallback is `~/.pi/peloton-runtime/<pi-pid>.sock`.
+The leaf directory must be owned by the user with no group/other permissions;
+sockets are mode `0600`. Paths longer than 100 bytes fail clearly. There is no
+network listener or separate discovery registry file: the socket handshake
+provides minimal endpoint metadata.
+
+The client resolves the PID internally and obtains a random process-instance
+nonce plus a conversation-generation nonce. A bare PID on first contact means
+"the Pi currently at this PID." A client remembers up to 256 observed process
+identities within its active session and rejects known PID replacements; starting
+a new sender session/reloading allows deliberate first contact again. This is not
+authentication against hostile same-user processes.
+
+PID targets stay stable across conversation changes. The handshake binds each
+send to the recipient generation observed on that connection. Session changes
+and reloads restart listeners and invalidate locally tracked pending messages.
+A context filter excludes invalidated/stale peer messages while preserving
+recorded history. Pi owns its delivery queues: filtering a stale queued message
+cannot guarantee cancellation of a turn Pi already scheduled. Invalidation is
+recorded locally, not pushed back to the sender as a consumption acknowledgement.
+
+### Bounds and failures
+
+- Versioned JSONL envelopes; at most 24 KiB per frame and 16 KiB message content.
+- At most 16 connections, each with a 5-second total deadline.
+- At most 64 accepted messages not yet recorded by Pi.
+- Last 256 accepted envelopes retained for duplicate detection during the listener
+  lifetime. Identical duplicates return the original receipt; ID reuse with
+  changed content fails. Evicted entries and listener restarts lose this history.
+- No automatic retries. A timeout, abort, or lost acknowledgement can leave
+  acceptance unknown; retrying with a new ID may duplicate work.
+- Idempotent cleanup, safe stale socket-file checks, and visible protocol errors
+  (rate-limited to avoid flooding the recipient).
+
+Same-user peers are a trust boundary, not a strong sandbox. Sender identity is
+claimed metadata; peers can impersonate each other if malicious. No received
+text is evaluated as code or interpolated into shell commands. Message content
+is kept in normal session records, not separate transport logs.
+
+## Independent evaluation
+
+Structured sent/received records permit an independent read-only sidecar to
+correlate messages across sessions. It could assess errors caught, decisions
+changed, duplicated work, and time/token overhead without participating in or
+steering the collaboration. Evaluation tooling is outside this extension's scope.
+
+Transcripts can provide evidence of how collaboration helped or hindered work,
+but cannot alone establish an advantage over sequential review. Testing that
+claim requires comparable tasks, repeated trials, and independent outcome checks.
+
+## Verification and remaining work
+
+`npm test` covers protocol validation, identity and PID replacement, stale
+generations, concurrent senders, duplicate handling, admission bounds, permission
+checks, failure handling, cleanup, extension attribution/mapping, and lifecycle
+invalidation. It also installs the package in disposable settings and starts two
+isolated Pi 1.0.3 RPC subprocesses to verify loading, passive acceptance without a
+model call, a recipient conversation switch, and socket cleanup. Those processes
+use no provider credentials and do not contact unrelated sessions.
+
+**Not yet verified:** actual model responses, follow-up/steering while busy,
+interactive transcript layout, byte-for-byte editor preservation and cursor/focus,
+actual extension reload with pending native Pi queues, or crash recovery under
+races. See [AGENTS.md](AGENTS.md) for the manual verification checklist.
+
+Deferred: built-in discovery, tmux aliases, human send/list commands, automatic
+retries, remote transport, peer launching/supervision, scheduling, and automated
+session/model setup. Shared-checkout agents still need to coordinate file
+ownership; messaging does not make simultaneous edits safe.
