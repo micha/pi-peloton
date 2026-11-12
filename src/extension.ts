@@ -22,6 +22,7 @@ export default function peloton(pi: ExtensionAPI) {
   let active: Identity | undefined;
   let context: ExtensionContext | undefined;
   let historical = new Set<string>();
+  let recorded = new Set<string>();
   let invalidated = new Set<string>();
   let lastErrorAt = 0;
 
@@ -65,6 +66,7 @@ export default function peloton(pi: ExtensionAPI) {
         if (data?.kind === "invalidated" && data.key) invalidated.add(data.key);
       }
     }
+    recorded = new Set(historical);
     const directory = runtimeDirectory();
     const recipient = identity(process.pid, instance);
     const nextInbox = new Inbox(recipient);
@@ -102,7 +104,10 @@ export default function peloton(pi: ExtensionAPI) {
   pi.on("message_end", event => {
     if (event.message.role === "custom" && event.message.customType === MESSAGE) {
       const details = event.message.details as PeerDetails | undefined;
-      if (details?.envelope) inbox?.recorded(details.envelope);
+      if (details?.envelope) {
+        recorded.add(messageKey(details.envelope));
+        inbox?.recorded(details.envelope);
+      }
     }
   });
 
@@ -125,20 +130,31 @@ export default function peloton(pi: ExtensionAPI) {
   pi.registerMessageRenderer<PeerDetails>(MESSAGE, (message, _options, theme) => {
     const envelope = message.details?.envelope;
     const box = new Box(1, 1, text => theme.bg("customMessageBg", text));
-    box.addChild(new Text(theme.fg("accent", `PEER · RECEIVED ← Pi PID ${envelope?.sender.pid ?? "?"}`), 0, 0));
-    box.addChild(new Text(safeText(envelope?.content ?? message.content), 0, 0));
+    box.addChild(new Text(theme.fg("accent", `PEER · RECEIVED ← Pi PID ${envelope?.sender.pid ?? "?"} · recorded`), 0, 0));
+    box.addChild(new Text(theme.fg("text", safeText(envelope?.content ?? message.content)), 0, 0));
     box.addChild(new Text(theme.fg("dim", `${safeText(envelope?.delivery)} · ${safeText(envelope?.id)} · recorded, not proof of model consumption`), 0, 0));
     return box;
   });
-  pi.registerEntryRenderer<Status>(STATUS, (entry, _options, theme) => {
+  pi.registerEntryRenderer<Status>(STATUS, (entry, { expanded }, theme) => {
     const data = entry.data;
     const box = new Box(1, 1, text => theme.bg("customMessageBg", text));
-    box.addChild(new Text(theme.fg(data?.kind === "queued" ? "accent" : "warning", `PEER · ${safeText(data?.text)}`), 0, 0));
+    box.addChild(new Text(theme.fg(data?.kind === "queued" ? "dim" : "warning", `PEER · ${safeText(data?.text)}`), 0, 0));
     if (data?.envelope) {
-      box.addChild(new Text(safeText(data.envelope.content), 0, 0));
+      box.addChild(new Text(theme.fg(data.kind === "queued" ? "dim" : "text", safeText(data.envelope.content)), 0, 0));
       box.addChild(new Text(theme.fg("dim", `${safeText(data.envelope.id)} · acceptance only`), 0, 0));
     }
-    return box;
+    // Always retain a component: Pi omits entries whose renderer returns
+    // undefined, which would also make them unavailable to Ctrl-O on resume.
+    // Check visibility at render time so an already-displayed acceptance card
+    // disappears on the normal repaint when its custom message is recorded.
+    const key = data?.kind === "queued" && data.envelope ? messageKey(data.envelope) : undefined;
+    return {
+      render(width: number) {
+        if (key && recorded.has(key) && !expanded) return [];
+        return box.render(width);
+      },
+      invalidate() { box.invalidate(); },
+    };
   });
 
   pi.registerTool({

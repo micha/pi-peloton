@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import peloton from "../src/extension.ts";
 import { PeerClient, PeerServer, socketPath } from "../src/transport.ts";
-import { identity, LIMITS } from "../src/protocol.ts";
+import { identity, LIMITS, type Envelope } from "../src/protocol.ts";
 
 function harness() {
   const handlers = new Map<string, Function[]>();
@@ -44,6 +44,45 @@ function harness() {
   };
 }
 
+test("acceptance is subdued while pending and expanded-only after recording", async () => {
+  const h = harness();
+  peloton(h.pi as unknown as ExtensionAPI);
+  const envelope: Envelope = {
+    version: 1, id: "render-test", sender: identity(12345), recipient: identity(23456),
+    content: "hello\x1b[31m", delivery: "nextTurn",
+  };
+  const colors: { color: string; text: string }[] = [];
+  const theme = {
+    fg(color: string, text: string) { colors.push({ color, text }); return text; },
+    bg(_color: string, text: string) { return text; },
+  };
+  const entry = { data: {
+    kind: "queued", text: "RECEIVED ← Pi PID 12345 · accepted for nextTurn", envelope,
+  } };
+  const acceptanceComponent = h.renderers.get("peloton.status")!(entry, { expanded: false }, theme);
+  const accepted = acceptanceComponent.render(120).join("\n");
+  assert.ok(colors.every(call => call.color === "dim"));
+  assert.match(accepted, /accepted for nextTurn/);
+  assert.match(accepted, /acceptance only/);
+  assert.match(accepted, /hello\\u001b\[31m/);
+  colors.length = 0;
+  const recorded = h.renderers.get("peloton.peer")!({ content: envelope.content, details: { envelope } }, {}, theme).render(120).join("\n");
+  assert.ok(colors.some(call => call.color === "accent" && call.text.includes("· recorded")));
+  assert.ok(colors.some(call => call.color === "text" && call.text === "hello\\u001b[31m"));
+  assert.match(recorded, /RECEIVED ← Pi PID 12345 · recorded/);
+  assert.match(recorded, /not proof of model consumption/);
+  await h.emit("message_end", { message: { role: "custom", customType: "peloton.peer", details: { envelope } } });
+  assert.deepEqual(acceptanceComponent.render(120), []); // Existing card updates on repaint.
+  assert.deepEqual(h.renderers.get("peloton.status")!(entry, { expanded: false }, theme).render(120), []);
+  const expanded = h.renderers.get("peloton.status")!(entry, { expanded: true }, theme).render(120).join("\n");
+  assert.match(expanded, /accepted for nextTurn/);
+  assert.match(expanded, /hello\\u001b\[31m/);
+  assert.match(expanded, /acceptance only/);
+  colors.length = 0;
+  h.renderers.get("peloton.status")!({ data: { kind: "error", text: "Unavailable peer" } }, {}, theme);
+  assert.equal(colors[0].color, "warning");
+});
+
 test("extension lifecycle, delivery mapping, attribution, limits, literal commands and invalidation", async t => {
   const root = await mkdtemp(join(tmpdir(), "peloton-ext-"));
   const oldRuntime = process.env.XDG_RUNTIME_DIR;
@@ -77,15 +116,21 @@ test("extension lifecycle, delivery mapping, attribution, limits, literal comman
 
   // Recording releases admission capacity, but is not called consumption.
   await h.emit("message_end", { message: { ...h.messages[0].message, role: "custom" } });
+  // Simulate a recorded message on a resumed branch to test reconstruction.
+  h.entries.push({ type: "custom_message", customType: "peloton.peer", details: h.messages[0].message.details });
   for (let i = 0; i < LIMITS.pending - 2; i++) await client.send(sender, process.pid, "passive", "nextTurn");
   await assert.rejects(client.send(sender, process.pid, "overflow", "nextTurn"), /pending-message limit/);
   const oldQueued = { ...h.messages[1].message, role: "custom" };
   await h.emit("session_shutdown");
   await h.emit("session_shutdown"); // Idempotent cleanup.
   await assert.rejects(lstat(socketPath(directory, process.pid)), { code: "ENOENT" });
-  assert.ok(h.entries.some(e => e.data.kind === "invalidated"));
+  assert.ok(h.entries.some(e => e.data?.kind === "invalidated"));
   h.session("session-2");
   await h.emit("session_start");
+  const firstAcceptance = h.entries.find(e => e.type === "custom" && e.data.kind === "queued");
+  const theme = { fg(_color: string, text: string) { return text; }, bg(_color: string, text: string) { return text; } };
+  assert.deepEqual(h.renderers.get("peloton.status")!(firstAcceptance, { expanded: false }, theme).render(120), []);
+  assert.ok(h.renderers.get("peloton.status")!(firstAcceptance, { expanded: true }, theme).render(120).length > 0);
   const result = await h.emit("context", { messages: [oldQueued, { role: "user", content: "hello" }] });
   assert.equal(result.messages.length, 1);
   assert.equal(result.messages[0].role, "user");

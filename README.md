@@ -5,8 +5,9 @@ human's prompt editor.
 
 **Status: experimental prototype.** The extension, Unix-socket transport, and
 automated tests now exist. The development target is **Pi 1.0.3 on Unix**, with
-Node.js 22.19 or newer. Other Pi versions and manual TUI behavior have not been
-verified. This is not a published or production-hardened package.
+Node.js 22.19 or newer. A live smoke test covered Pi 1.0.3 TUI messaging and one
+human-prepared draft; other Pi versions and broader lifecycle/editor behavior
+have not been verified. This is not a published or production-hardened package.
 
 ## Collaboration hypothesis
 
@@ -96,8 +97,9 @@ There is no built-in peer listing or friendly window-name resolver.
 
 `triggerTurn` is an internal per-call choice, not a public Peloton option or a
 global Pi setting. These semantics were checked against Pi 1.0.3 source and the
-extension's mapping is tested. Real model turns and busy delivery boundaries
-still require verification.
+extension's mapping is tested. A live TUI smoke test also verified idle wake-up,
+busy follow-up, steering after a tool boundary, and passive delivery on the next
+human prompt; see [verification details](docs/verification.md).
 
 ## Visible, attributed messages
 
@@ -107,8 +109,13 @@ sender/recipient instance and conversation-generation identities, delivery mode,
 optional reply-to ID, recipient Pi session ID, and acceptance time.
 
 A transcript-only `peloton.status` entry displays accepted messages immediately,
-including passive or queued content. The custom message is rendered again when
-Pi records it into the conversation. Sent tool calls show content and direction;
+including passive or queued content. Acceptance cards use the theme's subdued
+`dim` tone throughout. Once Pi records the custom message, the acceptance card's
+content is hidden in the normal view; **Ctrl-O** shows it in the expanded view.
+The recorded message uses an accented `recorded` heading and full-contrast body
+text. Explicit accepted/recorded labels distinguish stages without relying on
+color. Both records remain in session history. Sent tool calls show content and
+direction;
 tool results retain the envelope, acceptance receipt, and sender session ID.
 Terminal controls and bidi overrides are escaped in peer text and renderers.
 
@@ -185,10 +192,15 @@ isolated Pi 1.0.3 RPC subprocesses to verify loading, passive acceptance without
 model call, a recipient conversation switch, and socket cleanup. Those processes
 use no provider credentials and do not contact unrelated sessions.
 
-**Not yet verified:** actual model responses, follow-up/steering while busy,
-interactive transcript layout, byte-for-byte editor preservation and cursor/focus,
-actual extension reload with pending native Pi queues, or crash recovery under
-races. See [AGENTS.md](AGENTS.md) for the manual verification checklist.
+A [live TUI smoke test](docs/verification.md) verified real model replies in both
+directions, busy follow-up, steering at a tool boundary, passive delivery, and
+preservation of a human-prepared ASCII draft and its cursor position in B. The
+extension was loaded temporarily in dedicated windows, not installed globally.
+
+**Not yet verified:** broader editor/focus behavior (including Unicode/multiline
+drafts and drafts on both sides), actual extension reload with pending native Pi
+queues, live TUI conversation changes/shutdown, or crash recovery under races.
+See [AGENTS.md](AGENTS.md) for the full manual verification checklist.
 
 Deferred: built-in discovery, tmux aliases, human send/list commands, automatic
 retries, remote transport, peer launching/supervision, scheduling, and automated

@@ -5,8 +5,10 @@
 Read [README.md](README.md) first. `pi-peloton` is an experimental Pi extension for
 visible peer-to-peer agent collaboration without interfering with human input.
 The prototype targets Pi 1.0.3 on Unix. Transport, extension integration, and
-automated tests exist; manual TUI verification and real model delivery remain
-outstanding. Do not describe unverified behavior as proven.
+automated tests exist. A live smoke test verified real model messaging, delivery
+modes, and one human-prepared draft; broader TUI/lifecycle verification remains
+outstanding. See [docs/verification.md](docs/verification.md). Do not describe
+unverified behavior as proven.
 
 Keep documentation synchronized with implementation. Clearly distinguish current
 behavior, design direction, and open decisions.
