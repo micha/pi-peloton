@@ -180,6 +180,19 @@ Automated checks verify that this guidance is present and names `peer_send`.
 Whether it prevents model busy-waiting in practice still needs a follow-up test
 after reloading the extension.
 
+## Delivery-backlog footer
+
+The status line now uses `{pid} →{pending_send} ←{pending_receive}`. Counts track
+live delivery state: sending/accepted outgoing correlations and admitted incoming
+messages not yet delivered. They do not count outstanding replies or tasks.
+
+The suite now has 26 passing tests. Assertions cover startup zeros, incoming
+admission/native delivery, mixed send/receive backlog, recording before
+acceptance, missing/rejected peers, correlation eviction, shutdown/session reset,
+and contexts without a UI. Status updates do not add model messages. The user
+subsequently reported the new footer working in a live test; no detailed trace
+of that check was independently captured.
+
 ## Automated checks
 
 At the prototype commit, `npm run check` and all 13 tests passed. The tests cover

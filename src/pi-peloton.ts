@@ -33,6 +33,15 @@ export default function peloton(pi: ExtensionAPI) {
   const outgoing = new Outgoing();
   const sendViews = new Map<string, () => void>();
   let notifications: RecordingNotifications | undefined;
+  let footerText: string | undefined;
+
+  const refreshStatus = () => {
+    if (!active || !context?.hasUI) return;
+    const text = `${active.pid} →${outgoing.pendingCount} ←${inbox?.pending.size ?? 0}`;
+    if (text === footerText) return;
+    context.ui.setStatus("peloton", text);
+    footerText = text;
+  };
 
   const notificationFailed = (update: RecordedUpdate, error: Error) => {
     if (!active || !sameIdentity(active, update.sender)) return;
@@ -69,6 +78,7 @@ export default function peloton(pi: ExtensionAPI) {
     sendViews.clear();
     await old?.close();
     context?.ui.setStatus("peloton", undefined);
+    footerText = undefined;
     context = undefined;
   };
 
@@ -111,6 +121,7 @@ export default function peloton(pi: ExtensionAPI) {
       if (active !== recipient || context !== ctx) throw new Error("Recipient session changed");
       nextInbox.accept(envelope);
       try {
+        refreshStatus();
         const acceptedAt = Date.now();
         // This entry makes even passive/queued messages visible immediately.
         status({ kind: "queued", text: "Accepted by recipient.", envelope, at: acceptedAt });
@@ -122,6 +133,7 @@ export default function peloton(pi: ExtensionAPI) {
         }, deliveryOptions(envelope.delivery));
       } catch (error) {
         nextInbox.recorded(envelope);
+        refreshStatus();
         throw error;
       }
     }, report, update => {
@@ -129,11 +141,12 @@ export default function peloton(pi: ExtensionAPI) {
       if (outgoing.receive(update)) {
         pi.appendEntry<DeliveryEvent>(DELIVERY, { kind: "recorded", update, at: Date.now() });
         outgoing.refresh(update.id);
+        refreshStatus();
       }
     });
     try {
       await server.start();
-      if (ctx.hasUI) ctx.ui.setStatus("peloton", `PEER · Pi PID ${process.pid}`);
+      refreshStatus();
     } catch (error) {
       report(error instanceof Error ? error : new Error(String(error)));
       await close();
@@ -150,6 +163,7 @@ export default function peloton(pi: ExtensionAPI) {
         const firstRecording = !recorded.has(key);
         recorded.add(key);
         inbox?.recorded(envelope);
+        refreshStatus();
         if (firstRecording && !invalidated.has(key) && active && sameIdentity(active, envelope.recipient)) {
           const update = recordingUpdate(envelope);
           try { notifications?.enqueue(update); }
@@ -240,10 +254,12 @@ export default function peloton(pi: ExtensionAPI) {
             details.envelope = envelope;
             const view = sendViews.get(_id);
             if (view) outgoing.watch(messageId, view);
+            refreshStatus();
           },
         });
         if (active !== sender) throw new Error("Sender conversation changed; recipient acceptance may have occurred");
         outgoing.accepted(messageId); // Never regress an early recording update.
+        refreshStatus();
         details.receipt = result.receipt;
         return {
           content: [{ type: "text", text: `${peerHeader("→", params.target, result.envelope.delivery, "accepted")}\nMessage ID: ${messageId}` }],
@@ -252,6 +268,7 @@ export default function peloton(pi: ExtensionAPI) {
       } catch (error) {
         if (active !== sender) throw error;
         outgoing.failed(messageId);
+        refreshStatus();
         details.error = safeText(error instanceof Error ? error.message : String(error));
         return { content: [{ type: "text", text: details.error }], details, isError: true };
       }

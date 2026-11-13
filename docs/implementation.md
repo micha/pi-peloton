@@ -50,6 +50,18 @@ enforced role or collaboration protocol.
 
 ## Rendering and session records
 
+The footer is `{pid} →{pending_send} ←{pending_receive}`. Outgoing counts include
+live correlations in `sending` or `accepted`, not `recorded`/`error`; incoming
+counts use the inbox admission backlog, released on native delivery. Sends enter
+tracking when the handshake prepares their envelope. Lost recording updates can
+leave a count positive until correlation eviction. Historical cards do not
+reconstitute live counts after a session change/reload.
+
+Refresh the footer on admission, send preparation/acceptance/failure, native
+incoming delivery, and outgoing recording updates. Cache the displayed string to
+avoid redundant redraws; clear it on shutdown. This is UI-only and does not add
+model input or start a turn.
+
 All cards use `PEER {←|→} Pi PID {pid} · {delivery} · {status}` followed by message
 content. Incoming acceptance is dim; recorded headers are accented with
 full-contrast bodies. Expanded views show correlation metadata without repeated

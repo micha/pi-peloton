@@ -16,11 +16,19 @@ function harness() {
   const entries: any[] = [];
   const tools: any[] = [];
   const renderers = new Map<string, Function>();
+  const statuses = new Map<string, string>();
+  const statusHistory: (string | undefined)[] = [];
   let sessionId = "session-1";
   const ctx = {
     hasUI: true,
     sessionManager: { getSessionId: () => sessionId, getBranch: () => entries },
-    ui: new Proxy({ setStatus() {}, notify() {} }, {
+    ui: new Proxy({
+      setStatus(key: string, text: string | undefined) {
+        if (text === undefined) statuses.delete(key); else statuses.set(key, text);
+        statusHistory.push(text);
+      },
+      notify() {},
+    }, {
       get(target, key) {
         if (key in target) return target[key as keyof typeof target];
         throw new Error(`Unexpected editor/UI access: ${String(key)}`);
@@ -36,7 +44,7 @@ function harness() {
     registerTool(tool: any) { tools.push(tool); },
   };
   return {
-    pi, ctx, messages, entries, tools, renderers,
+    pi, ctx, messages, entries, tools, renderers, statuses, statusHistory,
     session(id: string) { sessionId = id; },
     async emit(name: string, event: any = {}) {
       let result;
@@ -126,6 +134,7 @@ test("extension lifecycle, delivery mapping, attribution, limits, literal comman
   });
   await assert.rejects(lstat(directory), { code: "ENOENT" }); // Factory starts no resources.
   await h.emit("session_start");
+  assert.equal(h.statuses.get("peloton"), `${process.pid} →0 ←0`);
   const sender = identity(12345);
   const client = new PeerClient(directory);
   for (const mode of ["followUp", "steer", "nextTurn"] as const) {
@@ -149,18 +158,23 @@ test("extension lifecycle, delivery mapping, attribution, limits, literal comman
   assert.match(guidance, /not declaring the task complete/);
   assert.equal(h.tools[0].parameters.properties.session, undefined);
   assert.equal(h.entries.filter(e => e.data.kind === "queued").length, 3);
+  assert.equal(h.statuses.get("peloton"), `${process.pid} →0 ←3`);
 
   // Recording releases admission capacity, but is not called consumption.
   await h.emit("message_end", { message: { ...h.messages[0].message, role: "custom" } });
+  assert.equal(h.statuses.get("peloton"), `${process.pid} →0 ←2`);
   for (let i = 0; i < LIMITS.pending - 2; i++) await client.send(sender, process.pid, "passive", "nextTurn");
   await assert.rejects(client.send(sender, process.pid, "overflow", "nextTurn"), /pending-message limit/);
   const oldQueued = { ...h.messages[1].message, role: "custom" };
+  assert.equal(h.statuses.get("peloton"), `${process.pid} →0 ←${LIMITS.pending}`);
   await h.emit("session_shutdown");
   await h.emit("session_shutdown"); // Idempotent cleanup.
+  assert.equal(h.statuses.has("peloton"), false);
   await assert.rejects(lstat(socketPath(directory, process.pid)), { code: "ENOENT" });
   assert.ok(h.entries.some(e => e.data?.kind === "invalidated"));
   h.session("session-2");
   await h.emit("session_start");
+  assert.equal(h.statuses.get("peloton"), `${process.pid} →0 ←0`);
   const firstAcceptance = h.entries.find(e => e.type === "custom" && e.data.kind === "queued");
   const theme = { fg(_color: string, text: string) { return text; }, bg(_color: string, text: string) { return text; } };
   assert.deepEqual(h.renderers.get("peloton.status")!(firstAcceptance, { expanded: false }, theme).render(120), []);
@@ -169,6 +183,7 @@ test("extension lifecycle, delivery mapping, attribution, limits, literal comman
   assert.equal(result.messages.length, 1);
   assert.equal(result.messages[0].role, "user");
   await client.send(sender, process.pid, "new session is addressable");
+  assert.equal(h.statuses.get("peloton"), `${process.pid} →0 ←1`);
 
   // Outgoing tool receipt is structured and never injected as an incoming prompt.
   const peer = new PeerServer(directory, identity(34567), () => {});
@@ -179,6 +194,10 @@ test("extension lifecycle, delivery mapping, attribution, limits, literal comman
   assert.equal(sent.details.receipt.type, "accepted");
   assert.match(sent.content[0].text, /PEER → Pi PID 34567 · followUp · accepted/);
   assert.equal(h.messages.length, before);
+  assert.equal(h.statuses.get("peloton"), `${process.pid} →1 ←1`);
+  const failed = await h.tools[0].execute("tool-2", { target: 98765, content: "missing peer" }, undefined);
+  assert.equal(failed.isError, true);
+  assert.equal(h.statuses.get("peloton"), `${process.pid} →1 ←1`);
 });
 
 test("recording updates refresh outgoing rows before acceptance, persist invisibly, and survive reload", async t => {
@@ -231,6 +250,8 @@ test("recording updates refresh outgoing rows before acceptance, persist invisib
   tool.renderResult(result, { expanded: false, isPartial: false }, theme, ctx);
   assert.match(call.render(120).join("\n"), /PEER → Pi PID 34567 · followUp · recorded/);
   assert.equal(redraws, 1);
+  assert.ok(h.statusHistory.includes(`${process.pid} →1 ←0`));
+  assert.equal(h.statuses.get("peloton"), `${process.pid} →0 ←0`);
   assert.equal(h.messages.length, 0); // Control packets never invoke pi.sendMessage.
   assert.equal(h.renderers.has("peloton.delivery"), false);
   assert.equal(h.entries.filter(e => e.customType === "peloton.delivery" && e.data.kind === "recorded").length, 1);
@@ -257,6 +278,37 @@ test("recording updates refresh outgoing rows before acceptance, persist invisib
   assert.match(resumed.render(120).join("\n"), /· recorded/);
   await assert.rejects(control.sendRecorded(updates[0]), /stale conversation/);
   assert.equal(h.messages.length, 0);
+});
+
+test("footer removes rejected sends and does not update counts without a UI", async t => {
+  const root = await mkdtemp(join(tmpdir(), "peloton-footer-"));
+  const oldRuntime = process.env.XDG_RUNTIME_DIR;
+  process.env.XDG_RUNTIME_DIR = root;
+  const h = harness();
+  peloton(h.pi as unknown as ExtensionAPI);
+  let peer: PeerServer | undefined;
+  t.after(async () => {
+    await h.emit("session_shutdown");
+    await peer?.close();
+    if (oldRuntime === undefined) delete process.env.XDG_RUNTIME_DIR; else process.env.XDG_RUNTIME_DIR = oldRuntime;
+    await rm(root, { recursive: true, force: true });
+  });
+  await h.emit("session_start");
+  peer = new PeerServer(join(root, "pi-peloton"), identity(34567), () => { throw new Error("Rejected for test"); });
+  await peer.start();
+  const result = await h.tools[0].execute("rejected", { target: 34567, content: "test" }, undefined);
+  assert.equal(result.isError, true);
+  assert.ok(h.statusHistory.includes(`${process.pid} →1 ←0`));
+  assert.equal(h.statuses.get("peloton"), `${process.pid} →0 ←0`);
+  assert.equal(h.messages.length, 0);
+
+  await h.emit("session_shutdown");
+  h.ctx.hasUI = false;
+  await h.emit("session_start");
+  const updates = h.statusHistory.length;
+  await h.tools[0].execute("no-ui", { target: 34567, content: "test" }, undefined);
+  assert.equal(h.statusHistory.length, updates);
+  assert.equal(h.statuses.size, 0);
 });
 
 test("recipient recording sends one control notification without adding model input", async t => {

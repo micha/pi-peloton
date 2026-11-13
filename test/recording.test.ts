@@ -35,6 +35,28 @@ test("recording correlation validates both identities and is monotonic before ac
   assert.throws(() => outgoing.receive(update), /Unknown/);
 });
 
+test("pending send counts include sending and accepted, not recording or failures", () => {
+  const outgoing = new Outgoing();
+  const first = envelope("first");
+  const second = envelope("second");
+  assert.equal(outgoing.pendingCount, 0);
+  outgoing.prepare(first);
+  assert.equal(outgoing.pendingCount, 1);
+  outgoing.accepted(first.id);
+  assert.equal(outgoing.pendingCount, 1);
+  outgoing.prepare(second);
+  assert.equal(outgoing.pendingCount, 2);
+  outgoing.failed(second.id);
+  assert.equal(outgoing.pendingCount, 1);
+  outgoing.receive(recordingUpdate(first));
+  assert.equal(outgoing.pendingCount, 0);
+  outgoing.accepted(first.id); // A late receipt must not restore the count.
+  assert.equal(outgoing.pendingCount, 0);
+  outgoing.prepare(envelope("third"));
+  outgoing.clear();
+  assert.equal(outgoing.pendingCount, 0);
+});
+
 test("bounded live correlations evict only settled sends and reject expired updates", () => {
   const outgoing = new Outgoing();
   const first = envelope("first");
@@ -42,7 +64,9 @@ test("bounded live correlations evict only settled sends and reject expired upda
   for (let i = 1; i < LIMITS.outgoing; i++) outgoing.prepare(envelope(`id-${i}`));
   assert.throws(() => outgoing.prepare(envelope("overflow")), /limit/);
   outgoing.accepted(first.id);
+  assert.equal(outgoing.pendingCount, LIMITS.outgoing);
   outgoing.prepare(envelope("next"));
+  assert.equal(outgoing.pendingCount, LIMITS.outgoing); // Evicted acceptance no longer counts.
   assert.throws(() => outgoing.receive(recordingUpdate(first)), /expired/);
 });
 

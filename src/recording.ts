@@ -12,6 +12,13 @@ export interface TrackedSend {
 /** Bounded live correlation; durable status history belongs to Pi's session. */
 export class Outgoing {
   private entries = new Map<string, TrackedSend>();
+  get pendingCount(): number {
+    let count = 0;
+    for (const send of this.entries.values()) {
+      if (send.stage === "sending" || send.stage === "accepted") count++;
+    }
+    return count;
+  }
   prepare(envelope: Envelope) {
     if (this.entries.has(envelope.id)) throw new Error("Outgoing message ID already exists");
     if (this.entries.size >= LIMITS.outgoing) {

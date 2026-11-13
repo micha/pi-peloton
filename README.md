@@ -100,6 +100,19 @@ nonblank and no larger than 16 KiB in UTF-8.
 
 ## What you'll see
 
+The status line shows your Pi PID and tracked delivery backlog:
+
+```text
+1234 →0 ←4
+```
+
+- **→N**: outgoing messages still sending or accepted, awaiting recording.
+- **←N**: accepted incoming messages still pending delivery into the conversation.
+
+These are live delivery counts, not messages awaiting a reply. They reset on
+session changes/reload. A lost recording update can leave an outgoing count
+positive until its correlation is discarded.
+
 Messages use a consistent card format:
 
 ```text

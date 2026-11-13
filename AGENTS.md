@@ -39,6 +39,9 @@ intent, automated checks, independent live observations, and user reports.
   {message}
   ```
 
+- The footer uses `{pid} →{pending_send} ←{pending_receive}` for live delivery
+  backlog, not awaiting-response/task counts. Refresh it on state transitions,
+  reset it on lifecycle changes, and do not count recorded/failed sends.
 - Keep acceptance subdued. Hide incoming acceptance content once recorded,
   retaining it under Ctrl-O. Update outgoing cards in place. Keep repeated
   acceptance/recording implication notices out of cards; explain semantics in
