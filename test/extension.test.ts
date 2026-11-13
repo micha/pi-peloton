@@ -6,7 +6,7 @@ import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import peloton from "../src/extension.ts";
+import peloton from "../src/pi-peloton.ts";
 import { PeerClient, PeerServer, socketPath } from "../src/transport.ts";
 import { identity, LIMITS, VERSION, recordingUpdate, type Envelope, type RecordedUpdate } from "../src/protocol.ts";
 

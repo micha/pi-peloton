@@ -74,7 +74,7 @@ intent, automated checks, independent live observations, and user reports.
 
 ## Code and documentation map
 
-- `src/extension.ts`: lifecycle, `peer_send`, messages, metadata, renderers.
+- `src/pi-peloton.ts`: lifecycle, `peer_send`, messages, metadata, renderers.
 - `src/protocol.ts`: types, validation, identities, limits, safe text.
 - `src/transport.ts`: private Unix sockets, handshakes, frames, receipts, cleanup.
 - `src/inbox.ts`: inbound admission tracking.

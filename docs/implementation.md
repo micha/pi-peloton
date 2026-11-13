@@ -12,7 +12,7 @@ separate from the Pi version; mixed v1/v2 endpoints fail before sending content.
 
 | File | Responsibility |
 | --- | --- |
-| `src/extension.ts` | Pi lifecycle, tool registration, attributed messages, session metadata, and renderers |
+| `src/pi-peloton.ts` | Pi lifecycle, tool registration, attributed messages, session metadata, and renderers |
 | `src/protocol.ts` | Envelope/control types, validation, identities, limits, and safe text |
 | `src/transport.ts` | PID socket lookup, framed transport, handshakes, receipts, and endpoint cleanup |
 | `src/inbox.ts` | Admission tracking for accepted messages not yet recorded |

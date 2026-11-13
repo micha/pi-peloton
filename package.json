@@ -5,7 +5,7 @@
   "description": "Local peer messaging for prepared Pi instances",
   "type": "module",
   "keywords": ["pi-package"],
-  "pi": { "extensions": ["./src/extension.ts"] },
+  "pi": { "extensions": ["./src/pi-peloton.ts"] },
   "scripts": {
     "check": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts"
