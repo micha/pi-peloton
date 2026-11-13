@@ -3,8 +3,8 @@ import { mkdir, lstat, chmod, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { LIMITS, VERSION, isIdentity, isPid, sameIdentity, validateEnvelope,
-  type Identity, type Envelope, type Delivery, type Receipt } from "./protocol.ts";
+import { LIMITS, VERSION, isIdentity, isPid, sameIdentity, validateEnvelope, validateRecordedUpdate,
+  type Identity, type Envelope, type Delivery, type Receipt, type Packet, type RecordedUpdate } from "./protocol.ts";
 
 export function runtimeDirectory(env = process.env, home = homedir()): string {
   return env.XDG_RUNTIME_DIR ? join(env.XDG_RUNTIME_DIR, "pi-peloton") : join(home, ".pi", "peloton-runtime");
@@ -76,7 +76,8 @@ export class PeerServer {
   private owned?: { ino: number; dev: number };
   constructor(readonly directory: string, readonly identity: Identity,
     private accept: (envelope: Envelope) => void,
-    private report: (error: Error) => void = () => {}) {}
+    private report: (error: Error) => void = () => {},
+    private acceptRecorded: (update: RecordedUpdate) => void = () => { throw new Error("Recording updates are unsupported"); }) {}
 
   async start() {
     await privateDirectory(this.directory);
@@ -98,17 +99,19 @@ export class PeerServer {
       frames(socket, value => {
         if (used) throw new Error("Only one message is allowed per connection");
         used = true;
-        const envelope = validateEnvelope(value);
-        if (!sameIdentity(envelope.recipient, this.identity)) throw new Error("Stale recipient conversation or process");
-        const key = `${envelope.sender.pid}:${envelope.sender.instance}:${envelope.id}`;
-        const fingerprint = JSON.stringify(envelope);
+        const control = value && typeof value === "object" && (value as { type?: unknown }).type === "recorded";
+        const packet = control ? validateRecordedUpdate(value) : validateEnvelope(value);
+        if (!sameIdentity(packet.recipient, this.identity)) throw new Error("Stale recipient conversation or process");
+        const key = `${control ? "recorded" : "message"}:${packet.sender.pid}:${packet.sender.instance}:${packet.id}`;
+        const fingerprint = JSON.stringify(packet);
         const existing = this.seen.get(key);
         if (existing) {
           if (existing.envelope !== fingerprint) throw new Error("Message ID reused with different content");
           socket.end(`${JSON.stringify(existing.receipt)}\n`); return;
         }
-        this.accept(envelope);
-        const receipt: Receipt = { type: "accepted", id: envelope.id, recipient: this.identity, acceptedAt: Date.now() };
+        if (control) this.acceptRecorded(packet as RecordedUpdate);
+        else this.accept(packet as Envelope);
+        const receipt: Receipt = { type: "accepted", id: packet.id, recipient: this.identity, acceptedAt: Date.now() };
         this.seen.set(key, { envelope: fingerprint, receipt });
         if (this.seen.size > LIMITS.duplicates) this.seen.delete(this.seen.keys().next().value!);
         socket.end(`${JSON.stringify(receipt)}\n`);
@@ -147,27 +150,47 @@ export class PeerClient {
   private known = new Map<number, string>();
   constructor(readonly directory: string) {}
   async send(sender: Identity, target: number, content: string, delivery: Delivery = "followUp",
-    options: { replyTo?: string; id?: string; signal?: AbortSignal } = {}): Promise<{ envelope: Envelope; receipt: Receipt }> {
+    options: { replyTo?: string; id?: string; signal?: AbortSignal; onEnvelope?: (envelope: Envelope) => void } = {}): Promise<{ envelope: Envelope; receipt: Receipt }> {
+    const result = await this.exchange(sender, target, recipient => {
+      const envelope = validateEnvelope({ version: VERSION, id: options.id ?? randomUUID(), sender,
+        recipient, content, delivery, ...(options.replyTo ? { replyTo: options.replyTo } : {}) });
+      options.onEnvelope?.(envelope);
+      return envelope;
+    }, options.signal);
+    return { envelope: result.packet, receipt: result.receipt };
+  }
+
+  async sendRecorded(update: RecordedUpdate, signal?: AbortSignal): Promise<Receipt> {
+    validateRecordedUpdate(update);
+    const result = await this.exchange(update.sender, update.recipient.pid, recipient => {
+      if (!sameIdentity(recipient, update.recipient)) throw new Error("Recording update targets a stale conversation or process");
+      return update;
+    }, signal);
+    return result.receipt;
+  }
+
+  private async exchange<T extends Packet>(sender: Identity, target: number,
+    prepare: (recipient: Identity) => T, signal?: AbortSignal): Promise<{ packet: T; receipt: Receipt }> {
     if (target === sender.pid) throw new Error("Cannot send to this Pi instance");
     const path = socketPath(this.directory, target);
     await privateDirectory(this.directory);
     const stat = await lstat(path);
     if (!stat.isSocket() || stat.uid !== process.getuid?.() || (stat.mode & 0o077)) throw new Error("Unsafe peer socket permissions");
-    options.signal?.throwIfAborted();
+    signal?.throwIfAborted();
     return new Promise((resolve, reject) => {
       const socket = createConnection(path);
-      let envelope: Envelope | undefined;
+      let packet: T | undefined;
       let settled = false;
       const finish = (error?: Error, receipt?: Receipt) => {
         if (settled) return;
         settled = true;
-        options.signal?.removeEventListener("abort", abort);
+        signal?.removeEventListener("abort", abort);
         clearTimeout(deadline);
         socket.destroy();
-        if (error) reject(error); else resolve({ envelope: envelope!, receipt: receipt! });
+        if (error) reject(error); else resolve({ packet: packet!, receipt: receipt! });
       };
       const abort = () => finish(new Error("Peer send aborted; acceptance may be unknown"));
-      options.signal?.addEventListener("abort", abort, { once: true });
+      signal?.addEventListener("abort", abort, { once: true });
       const deadline = setTimeout(() => finish(new Error("Peer timed out; acceptance may be unknown")), LIMITS.timeoutMs);
       socket.on("error", error => finish(error));
       socket.on("close", () => finish(new Error("Peer disconnected before acknowledgement; acceptance may be unknown")));
@@ -175,19 +198,19 @@ export class PeerClient {
         const v = value as Record<string, unknown>;
         if (!v || typeof v !== "object") throw new Error("Malformed response");
         if (v.type === "error") throw new Error(typeof v.error === "string" ? v.error : "Peer rejected message");
-        if (!envelope) {
+        if (!packet) {
+          if (v.type === "hello" && v.version !== VERSION) throw new Error(`Unsupported Peloton protocol (expected v${VERSION}); reload both Pi instances`);
           if (v.type !== "hello" || v.version !== VERSION || !isIdentity(v.identity) || v.identity.pid !== target) throw new Error("Invalid peer handshake");
           const previous = this.known.get(target);
           if (previous && previous !== v.identity.instance) throw new Error("Peer PID now belongs to a replacement process; restart sender session to reconnect deliberately");
           this.known.set(target, v.identity.instance);
           if (this.known.size > LIMITS.duplicates) this.known.delete(this.known.keys().next().value!);
-          envelope = validateEnvelope({ version: VERSION, id: options.id ?? randomUUID(), sender,
-            recipient: v.identity, content, delivery, ...(options.replyTo ? { replyTo: options.replyTo } : {}) });
-          write(socket, envelope);
+          packet = prepare(v.identity);
+          write(socket, packet);
         } else {
           const receipt = v as unknown as Receipt;
-          if (receipt.type !== "accepted" || receipt.id !== envelope.id || !isIdentity(receipt.recipient)
-            || !sameIdentity(receipt.recipient, envelope.recipient) || !Number.isSafeInteger(receipt.acceptedAt)) throw new Error("Invalid acknowledgement");
+          if (receipt.type !== "accepted" || receipt.id !== packet.id || !isIdentity(receipt.recipient)
+            || !sameIdentity(receipt.recipient, packet.recipient) || !Number.isSafeInteger(receipt.acceptedAt)) throw new Error("Invalid acknowledgement");
           finish(undefined, receipt);
         }
       }, error => finish(error));

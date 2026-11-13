@@ -76,10 +76,109 @@ remain in session history; visibility changes do not imply model consumption.
 Automated renderer tests check semantic color choices, explicit stage labels with
 color disabled, terminal-control escaping, hiding an existing card on repaint,
 expanded receipt visibility, and reconstruction from recorded branch history.
-The suite now has 14 passing tests. This refinement has not yet been visually
-checked in the live test windows; use `/reload` there to load it, then Ctrl-O to
-inspect acceptance details. Existing smoke-test captures show the preceding
-styling.
+The suite now has 14 passing tests. The follow-up check below confirmed the
+single-message collapsed view in live windows. Expanded receipt visibility is
+automatically tested but has not been separately captured live.
+
+## Global installation, fresh sessions, and reload — 2026-11-12
+
+After personal installation, the human started fresh sessions in the existing
+A/B test instances and ran `/reload` in the coordinating Pi. The coordinator then
+used its newly available `peer_send` tool directly, rather than the standalone
+controller:
+
+- Default follow-up to B woke it and produced a one-time `PELOTON-GLOBAL-B-ACK`
+  reply via `peer_send`, correlated with the original message ID.
+- Explicit steering to idle A woke it and produced a one-time
+  `PELOTON-GLOBAL-A-ACK` reply via `peer_send`, also correlated with the request.
+- Both replies targeted the coordinating Pi instance, whose extension accepted
+  them as follow-ups. Acceptance alone is not proof that the coordinating model
+  consumed the replies while its existing turn was still active.
+- Captures of both receiving TUIs showed one recorded incoming message, without
+  a second acceptance card in the normal collapsed view.
+- Instance PIDs stayed usable across the human-prepared conversation changes.
+  All messages were attributed, and neither agent was asked to modify files or
+  continue a reply loop.
+
+This confirms basic messaging after actual global installation and a coordinator
+reload, plus current-session routing after human session changes. It does not
+exercise pending-message invalidation across those changes or reloads, nor live
+shutdown cleanup. The A/B processes still had their explicit `-e` launch paths;
+this was not a test of automatic loading in an otherwise unconfigured new TUI.
+
+## Standard card format
+
+Message cards now use:
+
+```text
+PEER {←|→} Pi PID {pid} · {delivery} · {status}
+{message}
+```
+
+Message IDs and reply-to metadata are shown in expanded view. Repeated notices
+about acceptance/recording implications are removed from both normal and expanded
+cards; those semantics remain in the documentation and tool description. Outgoing
+cards update from `sending` to `accepted` in place rather than showing separate
+call/result cards. Errors remain visible.
+
+The suite now has 15 tests, including exact incoming/outgoing header/body layout,
+status transitions, escaping, and collapsed/expanded metadata. This latest
+formatting change has not yet been checked in the live TUIs.
+
+## Extension-only recording updates — wire protocol v2
+
+Outgoing cards now progress from `sending` to `accepted` to `recorded` when a
+validated recording control update arrives. The recipient uses the custom
+message's native `message_end` event as a signal, then waits for the matching Pi
+session entry before transmitting the update. The sender persists non-model
+`peloton.delivery` metadata and invalidates the existing tool row. No status
+packet becomes a collaborator prompt or an agent reply.
+
+Automated checks cover:
+
+- Both original identities and message IDs, including stale conversations/PID
+  replacements and unknown or expired correlations.
+- A deliberately early recording update before the acceptance response; later
+  acceptance and lost-acknowledgement errors do not regress the observed stage.
+- Duplicate control packets and conflicting updates, with no extra model input.
+- Bounded correlation/notification state, serial sends, no retries, and shutdown
+  cancellation.
+- Recording observation after the event but before transmission, with timeout
+  and cancellation rather than speculative status.
+- Immediate row refresh and restoration from recorded branch history on reload.
+- An actual Pi 1.0.3 recording event in an isolated RPC subprocess, using a
+  deterministic in-process provider without external calls. Recording generates
+  one control notification; it does not generate another model turn.
+
+The suite has 24 passing tests. The user subsequently reported the latest
+protocol/formatting working in a live check (see below); detailed traces for that
+check were not independently captured. Both ends must `/reload` after upgrading
+from protocol v1; mixed versions fail visibly.
+
+Pi 1.0.3 dispatches native extension `message_end` before appending the session
+entry, so the update worker confirms the entry separately. Its direct
+`triggerTurn:false` custom-message append emits session events
+but does not dispatch the extension `message_end` hook. Peloton's ordinary
+follow-up/steering and next-user-turn delivery use native agent-message events;
+the isolated test uses that path rather than treating a direct append as proof
+of notification support.
+
+## User-reported live check and busy-waiting guidance
+
+The user reported that the recording-update/card changes worked in a live test.
+They also observed an agent looping on `sleep` while waiting for a peer response
+rather than ending its turn. No detailed transcript of that run was independently
+captured, so this is a user report rather than an expanded verification matrix.
+
+The `peer_send` description and active-tool `promptGuidelines` now explain that
+default follow-up replies arrive automatically, keeping a turn busy delays their
+delivery, and an agent with nothing but waiting left should finish its current
+turn. Independent work can continue; ending a turn is not declaring the task
+complete. The extension does not enforce a stopping protocol or choose roles.
+
+Automated checks verify that this guidance is present and names `peer_send`.
+Whether it prevents model busy-waiting in practice still needs a follow-up test
+after reloading the extension.
 
 ## Automated checks
 

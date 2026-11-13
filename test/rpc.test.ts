@@ -5,8 +5,9 @@ import { mkdtemp, mkdir, rm, lstat, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
-import { PeerClient, socketPath } from "../src/transport.ts";
-import { identity } from "../src/protocol.ts";
+import { setTimeout as delay } from "node:timers/promises";
+import { PeerClient, PeerServer, socketPath } from "../src/transport.ts";
+import { identity, type RecordedUpdate } from "../src/protocol.ts";
 
 const cli = resolve("node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js");
 function rpc(child: ChildProcessWithoutNullStreams) {
@@ -66,7 +67,7 @@ test("two isolated Pi 1.0.3 subprocesses load local package, accept passive mess
     await rm(root, { recursive: true, force: true });
   });
   const packagePath = resolve(".");
-  async function start(name: string) {
+  async function start(name: string, extraExtensions: string[] = [], extraArgs: string[] = []) {
     const config = join(root, name);
     // Allowlist environment: no inherited provider credentials or live Pi config.
     const env = {
@@ -80,7 +81,7 @@ test("two isolated Pi 1.0.3 subprocesses load local package, accept passive mess
     install.stderr.on("data", chunk => diagnostics += chunk);
     assert.equal((await once(install, "exit"))[0], 0, diagnostics);
     assert.ok((await readFile(join(config, "settings.json"), "utf8")).includes(packagePath));
-    const child = spawn(process.execPath, [cli, "--mode", "rpc", "--no-session", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-builtin-tools"], { cwd: root, env });
+    const child = spawn(process.execPath, [cli, "--mode", "rpc", "--no-session", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-builtin-tools", ...extraExtensions.flatMap(path => ["-e", path]), ...extraArgs], { cwd: root, env });
     children.push(child);
     const request = rpc(child);
     await request("get_state");
@@ -89,7 +90,7 @@ test("two isolated Pi 1.0.3 subprocesses load local package, accept passive mess
     return { child, request, path };
   }
   const a = await start("a");
-  const b = await start("b");
+  const b = await start("b", [resolve("test/fixtures/record-peer.ts")], ["--provider", "peloton-test", "--model", "model"]);
   const client = new PeerClient(join(runtime, "pi-peloton"));
   await client.send(identity(a.child.pid!), b.child.pid!, "Please review HANDOFF.md, without starting work yet.", "nextTurn");
   const state = await b.request("get_state");
@@ -99,6 +100,38 @@ test("two isolated Pi 1.0.3 subprocesses load local package, accept passive mess
   assert.equal(queued.data.envelope.sender.pid, a.child.pid);
   assert.equal(queued.data.envelope.delivery, "nextTurn");
   assert.ok(!records.entries.some((entry: any) => entry.type === "message" && entry.message.role === "assistant"));
+
+  // A test-only command runs accepted content through a deterministic provider,
+  // exercising native Pi recording and control transport without network calls.
+  const controllerIdentity = identity(34567);
+  let resolveRecorded!: (update: RecordedUpdate) => void;
+  let notificationTimer: NodeJS.Timeout;
+  const notification = new Promise<RecordedUpdate>((resolve, reject) => {
+    notificationTimer = setTimeout(() => reject(new Error("No native recording notification")), 5000);
+    resolveRecorded = update => { clearTimeout(notificationTimer); resolve(update); };
+  });
+  t.after(() => clearTimeout(notificationTimer));
+  let unexpectedInputs = 0;
+  const controller = new PeerServer(join(runtime, "pi-peloton"), controllerIdentity,
+    () => unexpectedInputs++, () => {}, resolveRecorded);
+  await controller.start();
+  t.after(() => controller.close());
+  const recordProbe = await client.send(controllerIdentity, b.child.pid!, "native recording probe", "nextTurn");
+  const command = await b.request("prompt", { message: "/peloton-test-record" });
+  assert.equal(command.disposition, "handled");
+  const update = await notification;
+  assert.equal(update.id, recordProbe.envelope.id);
+  assert.deepEqual(update.recipient, controllerIdentity);
+  assert.equal(unexpectedInputs, 0);
+  for (let i = 0; i < 100 && (await b.request("get_state")).isStreaming; i++) await delay(20);
+  assert.equal((await b.request("get_state")).isStreaming, false);
+  const afterRecording = await b.request("get_entries");
+  assert.ok(afterRecording.entries.some((entry: any) => entry.type === "custom_message" && entry.details?.envelope.id === update.id));
+  const calls = afterRecording.entries.filter((entry: any) => entry.customType === "peloton.test-model");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].data.calls, 1);
+  const senderEntries = await a.request("get_entries");
+  assert.ok(!senderEntries.entries.some((entry: any) => entry.type === "message" && entry.message.role === "assistant"));
 
   // A human-equivalent conversation switch in the isolated test recipient.
   await b.request("new_session");

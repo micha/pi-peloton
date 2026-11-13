@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createConnection, createServer } from "node:net";
 import { once } from "node:events";
-import { identity, LIMITS, validateEnvelope, deliveryOptions, safeText, type Envelope } from "../src/protocol.ts";
+import { identity, LIMITS, VERSION, validateEnvelope, deliveryOptions, safeText, type Envelope } from "../src/protocol.ts";
 import { Inbox } from "../src/inbox.ts";
 import { PeerServer, PeerClient, socketPath, runtimeDirectory, privateDirectory } from "../src/transport.ts";
 
@@ -79,7 +79,7 @@ test("invalid envelope, invalid UTF8 and oversize frames are rejected without st
 test("stale conversation from handshake is rejected", async t => {
   const f = await fixture(t);
   const response = await raw(f.directory, f.recipient.pid, hello => JSON.stringify({
-    version: 1, id: "stale", sender: f.sender, recipient: { ...hello.identity, generation: "old" }, content: "hello", delivery: "followUp",
+    version: VERSION, id: "stale", sender: f.sender, recipient: { ...hello.identity, generation: "old" }, content: "hello", delivery: "followUp",
   }) + "\n");
   assert.match(response.error, /Stale/);
   assert.equal(f.received.length, 0);
@@ -120,7 +120,7 @@ test("bounded pending inbox and invalidation", () => {
   const recipient = identity();
   const inbox = new Inbox(recipient);
   const sender = identity(42);
-  const envelope = (id: string) => validateEnvelope({ version: 1, id, sender, recipient, content: "test", delivery: "nextTurn" });
+  const envelope = (id: string) => validateEnvelope({ version: VERSION, id, sender, recipient, content: "test", delivery: "nextTurn" });
   for (let i = 0; i < LIMITS.pending; i++) inbox.accept(envelope(`id-${i}`));
   assert.throws(() => inbox.accept(envelope("overflow")), /limit/);
   inbox.recorded(envelope("id-0"));
@@ -137,7 +137,7 @@ test("delivery options, control characters, byte size, runtime fallback", () => 
   assert.equal(safeText("a\x1b[31m\r\u202eb"), "a\\u001b[31m\\u000d\\u202eb");
   assert.equal(runtimeDirectory({}, "/home/test"), "/home/test/.pi/peloton-runtime");
   assert.equal(runtimeDirectory({ XDG_RUNTIME_DIR: "/run/test" }), "/run/test/pi-peloton");
-  assert.throws(() => validateEnvelope({ version: 1, id: "id", sender: identity(), recipient: identity(), content: "😀".repeat(5000), delivery: "steer" }), /Invalid/);
+  assert.throws(() => validateEnvelope({ version: VERSION, id: "id", sender: identity(), recipient: identity(), content: "😀".repeat(5000), delivery: "steer" }), /Invalid/);
 });
 
 test("shutdown closes stalled connections and client reports lost acknowledgement", async t => {

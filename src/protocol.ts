@@ -1,18 +1,20 @@
 import { randomUUID } from "node:crypto";
 
-export const VERSION = 1;
+export const VERSION = 2;
 export const LIMITS = {
   contentBytes: 16 * 1024,
   frameBytes: 24 * 1024,
   connections: 16,
   pending: 64,
   duplicates: 256,
+  outgoing: 256,
+  notifications: 64,
   timeoutMs: 5000,
 } as const;
 export type Delivery = "followUp" | "steer" | "nextTurn";
 export interface Identity { pid: number; instance: string; generation: string }
 export interface Envelope {
-  version: 1;
+  version: typeof VERSION;
   id: string;
   sender: Identity;
   recipient: Identity;
@@ -20,6 +22,15 @@ export interface Envelope {
   delivery: Delivery;
   replyTo?: string;
 }
+export interface RecordedUpdate {
+  version: typeof VERSION;
+  type: "recorded";
+  id: string;
+  sender: Identity;
+  recipient: Identity;
+  recordedAt: number;
+}
+export type Packet = Envelope | RecordedUpdate;
 export interface Receipt {
   type: "accepted";
   id: string;
@@ -52,6 +63,21 @@ export function validateEnvelope(value: unknown): Envelope {
     || !["followUp", "steer", "nextTurn"].includes(v.delivery)
     || (v.replyTo !== undefined && !isToken(v.replyTo))) throw new Error("Invalid envelope fields or size");
   return v;
+}
+export function validateRecordedUpdate(value: unknown): RecordedUpdate {
+  if (!value || typeof value !== "object") throw new Error("Malformed recording update");
+  const v = value as RecordedUpdate;
+  if (v.version !== VERSION || v.type !== "recorded" || !isToken(v.id)
+    || !isIdentity(v.sender) || !isIdentity(v.recipient)
+    || !Number.isSafeInteger(v.recordedAt) || v.recordedAt < 0
+    || Object.keys(v).some(key => !["version", "type", "id", "sender", "recipient", "recordedAt"].includes(key))) {
+    throw new Error("Invalid recording update");
+  }
+  return v;
+}
+export function recordingUpdate(envelope: Envelope, recordedAt = Date.now()): RecordedUpdate {
+  return { version: VERSION, type: "recorded", id: envelope.id,
+    sender: envelope.recipient, recipient: envelope.sender, recordedAt };
 }
 export function messageKey(envelope: Envelope): string {
   return `${envelope.sender.pid}:${envelope.sender.instance}:${envelope.id}`;
