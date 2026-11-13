@@ -24,7 +24,7 @@ An agent-to-agent exchange viewed from the two Pi instances:
 
 | Agent A | Agent B |
 | --- | --- |
-| ![Agent A's conversation](docs/images/agent-a.png) | ![Agent B's conversation](docs/images/agent-b.png) |
+| ![Agent A's conversation](docs/images/agent-a.png?x=1) | ![Agent B's conversation](docs/images/agent-b.png?x=1) |
 
 ## Install
 
