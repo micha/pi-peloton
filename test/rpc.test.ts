@@ -51,7 +51,7 @@ function rpc(child: ChildProcessWithoutNullStreams) {
   };
 }
 
-test("two isolated Pi 1.0.3 subprocesses load local package, accept passive messages and clean up", { timeout: 45000 }, async t => {
+test("isolated Pi 1.0.3 API sends work with peer_send inactive, record, rebind and clean up", { timeout: 45000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), "peloton-rpc-"));
   const runtime = join(root, "run");
   await mkdir(runtime, { mode: 0o700 });
@@ -89,20 +89,36 @@ test("two isolated Pi 1.0.3 subprocesses load local package, accept passive mess
     await lstat(path);
     return { child, request, path };
   }
-  const a = await start("a");
+  const a = await start("a", [resolve("test/fixtures/api-consumer.ts")]);
   const b = await start("b", [resolve("test/fixtures/record-peer.ts")], ["--provider", "peloton-test", "--model", "model"]);
   const client = new PeerClient(join(runtime, "pi-peloton"));
-  await client.send(identity(a.child.pid!), b.child.pid!, "Please review HANDOFF.md, without starting work yet.", "nextTurn");
+  const sentByExtension = await a.request("prompt", { message: `/peloton-test-send ${JSON.stringify({
+    target: b.child.pid!, content: "Please review HANDOFF.md, without starting work yet.", delivery: "nextTurn", replyTo: "approved-resolution",
+  })}` });
+  assert.equal(sentByExtension.disposition, "handled");
+  const outbound = (await a.request("get_entries")).entries;
+  const apiResult = outbound.find((entry: any) => entry.customType === "peloton.test-send").data;
+  const toolState = outbound.find((entry: any) => entry.customType === "peloton.test-tools").data;
+  assert.ok(toolState.registered.includes("peer_send"));
+  assert.ok(!toolState.active.includes("peer_send"));
+  assert.equal(apiResult.ok, true);
+  assert.equal(apiResult.stage, "accepted");
+  assert.ok(outbound.some((entry: any) => entry.customType === "peloton.sent" && entry.data.messageId === apiResult.messageId));
   const state = await b.request("get_state");
   assert.equal(state.isStreaming, false);
   const records = await b.request("get_entries");
   const queued = records.entries.find((entry: any) => entry.customType === "peloton.status" && entry.data.kind === "queued");
   assert.equal(queued.data.envelope.sender.pid, a.child.pid);
   assert.equal(queued.data.envelope.delivery, "nextTurn");
+  assert.equal(queued.data.envelope.id, apiResult.messageId);
+  assert.equal(queued.data.envelope.replyTo, "approved-resolution");
   assert.ok(!records.entries.some((entry: any) => entry.type === "message" && entry.message.role === "assistant"));
 
   // A test-only command runs accepted content through a deterministic provider,
   // exercising native Pi recording and control transport without network calls.
+  await b.request("prompt", { message: "/peloton-test-record" });
+  for (let i = 0; i < 100 && (await b.request("get_state")).isStreaming; i++) await delay(20);
+  assert.equal((await b.request("get_state")).isStreaming, false);
   const controllerIdentity = identity(34567);
   let resolveRecorded!: (update: RecordedUpdate) => void;
   let notificationTimer: NodeJS.Timeout;
@@ -128,10 +144,25 @@ test("two isolated Pi 1.0.3 subprocesses load local package, accept passive mess
   const afterRecording = await b.request("get_entries");
   assert.ok(afterRecording.entries.some((entry: any) => entry.type === "custom_message" && entry.details?.envelope.id === update.id));
   const calls = afterRecording.entries.filter((entry: any) => entry.customType === "peloton.test-model");
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
   assert.equal(calls[0].data.calls, 1);
+  assert.equal(calls[1].data.calls, 2);
   const senderEntries = await a.request("get_entries");
   assert.ok(!senderEntries.entries.some((entry: any) => entry.type === "message" && entry.message.role === "assistant"));
+  assert.ok(senderEntries.entries.some((entry: any) => entry.customType === "peloton.delivery"
+    && entry.data.kind === "recorded" && entry.data.update.id === apiResult.messageId));
+  assert.deepEqual(senderEntries.entries.filter((entry: any) => entry.customType === "peloton.test-status"
+    && entry.data.messageId === apiResult.messageId).map((entry: any) => entry.data.stage), ["sending", "accepted", "recorded"]);
+  assert.ok(!senderEntries.entries.some((entry: any) => entry.type === "custom_message"));
+  // Pi replaces extension runtimes on session changes. The bus API must rebind.
+  await a.request("new_session");
+  await a.request("prompt", { message: `/peloton-test-send ${JSON.stringify({ target: b.child.pid!, content: "fresh sender", delivery: "nextTurn" })}` });
+  const freshSender = (await a.request("get_entries")).entries;
+  assert.equal(freshSender.filter((entry: any) => entry.customType === "peloton.test-send").length, 1);
+  assert.equal(freshSender.find((entry: any) => entry.customType === "peloton.test-send").data.ok, true);
+  const freshTools = freshSender.find((entry: any) => entry.customType === "peloton.test-tools").data;
+  assert.ok(freshTools.registered.includes("peer_send"));
+  assert.ok(!freshTools.active.includes("peer_send"));
 
   // A human-equivalent conversation switch in the isolated test recipient.
   await b.request("new_session");

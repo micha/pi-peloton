@@ -98,6 +98,22 @@ peer_send(target=12345, content="Context for your next prompt.", delivery="nextT
 `replyTo` optionally identifies a message being answered. Message content must be
 nonblank and no larger than 16 KiB in UTF-8.
 
+## From another extension
+
+Extensions can send directly, without asking a model to call `peer_send`:
+
+```ts
+import { sendPeerMessage } from "/path/to/pi-peloton/src/api.ts";
+
+const result = await sendPeerMessage(pi.events, { target: 12345, content: "Approved note." });
+```
+
+Load Peloton in the sending process too. The API shares the tool's transport,
+validation, attribution, and session records. It returns acceptance/errors;
+optional content-free events report later recording. A PID addresses the **current
+conversation**, not a pinned session or response. See the [consumer example and
+API contract](docs/extension-api.md) for lifecycle cleanup and limitations.
+
 ## What you'll see
 
 The status line shows your Pi PID and tracked delivery backlog:
@@ -170,6 +186,7 @@ npm test
 ```
 
 - [Verification record](docs/verification.md): tested behavior and remaining gaps.
+- [Extension API](docs/extension-api.md): programmatic sending and delivery events.
 - [Implementation notes](docs/implementation.md): APIs, transport, limits, and
   lifecycle details.
 - [AGENTS.md](AGENTS.md): instructions for coding agents working on this repository.

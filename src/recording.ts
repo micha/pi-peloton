@@ -21,12 +21,15 @@ export class Outgoing {
   }
   prepare(envelope: Envelope) {
     if (this.entries.has(envelope.id)) throw new Error("Outgoing message ID already exists");
+    let evicted: TrackedSend | undefined;
     if (this.entries.size >= LIMITS.outgoing) {
       const evictable = [...this.entries].find(([, send]) => send.stage !== "sending");
       if (!evictable) throw new Error("Outgoing correlation limit reached");
+      evicted = evictable[1];
       this.entries.delete(evictable[0]);
     }
     this.entries.set(envelope.id, { envelope, stage: "sending" });
+    return evicted;
   }
   get(id: string): TrackedSend | undefined { return this.entries.get(id); }
   accepted(id: string) {
@@ -55,7 +58,11 @@ export class Outgoing {
     if (send) send.invalidate = invalidate;
   }
   refresh(id: string) { this.entries.get(id)?.invalidate?.(); }
-  clear() { this.entries.clear(); }
+  clear() {
+    const discarded = [...this.entries.values()];
+    this.entries.clear();
+    return discarded;
+  }
 }
 
 /** Pi 1.0.3 dispatches extension message_end before appending the session entry. */

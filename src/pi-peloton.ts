@@ -3,14 +3,18 @@ import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Inbox } from "./inbox.ts";
-import { identity, deliveryOptions, safeText, messageKey, recordingUpdate, sameIdentity, LIMITS, type Envelope, type Identity, type Receipt, type RecordedUpdate } from "./protocol.ts";
+import { identity, deliveryOptions, safeText, messageKey, recordingUpdate, sameIdentity, isPid, isToken, LIMITS, type Envelope, type Identity, type Receipt, type RecordedUpdate } from "./protocol.ts";
 import { PeerServer, PeerClient, runtimeDirectory } from "./transport.ts";
 import { peerHeader, type CardStatus } from "./presentation.ts";
 import { Outgoing, RecordingNotifications, waitForRecording } from "./recording.ts";
+import { PELOTON_SEND, peerSendResultEvent, PELOTON_DELIVERY, type PeerSendInput, type PeerSendRequest,
+  type PeerSendResponse, type PeerSendResult, type PeerSendErrorCode, type PeerDeliveryStatus } from "./api.ts";
 
 const MESSAGE = "peloton.peer";
 const STATUS = "peloton.status";
 const DELIVERY = "peloton.delivery";
+const SENT = "peloton.sent";
+const SEND_RESULT = "peloton.send-result";
 // Preserve process identity across extension reloads; no sockets/timers start here.
 const instanceKey = Symbol.for("pi-peloton.process-instance.v1");
 const processGlobals = globalThis as typeof globalThis & { [instanceKey]?: string };
@@ -19,6 +23,22 @@ interface PeerDetails { envelope: Envelope; recipientSession: string; acceptedAt
 interface Status { kind: "queued" | "invalidated" | "error"; text: string; key?: string; envelope?: Envelope; at: number }
 interface SendDetails { messageId: string; envelope?: Envelope; receipt?: Receipt; senderSession?: string; error?: string }
 interface DeliveryEvent { kind: "recorded" | "notificationFailed"; update: RecordedUpdate; error?: string; at: number }
+interface SentEntry { messageId: string; input: PeerSendInput; senderSession: string; at: number }
+interface SendOutcome { result: PeerSendResult; details: SendDetails }
+
+function validateInput(value: unknown): PeerSendInput {
+  if (!value || typeof value !== "object") throw new Error("Invalid send input");
+  const input = value as PeerSendInput;
+  if (!isPid(input.target) || typeof input.content !== "string" || !input.content.trim()
+    || Buffer.byteLength(input.content) > LIMITS.contentBytes
+    || (input.delivery !== undefined && !["followUp", "steer", "nextTurn"].includes(input.delivery))
+    || (input.replyTo !== undefined && !isToken(input.replyTo))
+    || Object.keys(input).some(key => !["target", "content", "delivery", "replyTo"].includes(key))) {
+    throw new Error("Invalid target, content, delivery, replyTo, or extra send fields (content limit: 16 KiB UTF-8)");
+  }
+  return { target: input.target, content: input.content, delivery: input.delivery ?? "followUp",
+    ...(input.replyTo !== undefined ? { replyTo: input.replyTo } : {}) };
+}
 
 export default function peloton(pi: ExtensionAPI) {
   let server: PeerServer | undefined;
@@ -34,6 +54,116 @@ export default function peloton(pi: ExtensionAPI) {
   const sendViews = new Map<string, () => void>();
   let notifications: RecordingNotifications | undefined;
   let footerText: string | undefined;
+  let stopRequests: (() => void) | undefined;
+  const requests = new Set<string>();
+  const sends = new Map<string, { abort: AbortController; done: Promise<SendOutcome> }>();
+
+  // Observer failures must not change transport acceptance or fail a model tool.
+  const publish = (data: PeerDeliveryStatus) => { try { pi.events.emit(PELOTON_DELIVERY, data); } catch {} };
+  const deliveryStatus = (envelope: Envelope, stage: PeerDeliveryStatus["stage"], extra = {}) => {
+    publish({ messageId: envelope.id, target: envelope.recipient.pid, delivery: envelope.delivery,
+      senderSession: context!.sessionManager.getSessionId(), stage, at: Date.now(), ...extra } as PeerDeliveryStatus);
+  };
+
+  // Both entry points own the same validation, transport, cancellation and tracking.
+  const send = (value: unknown, messageId: string, signal?: AbortSignal, toolCallId?: string): Promise<SendOutcome> => {
+    const sender = active;
+    const senderClient = client;
+    const senderSession = context?.sessionManager.getSessionId();
+    const details: SendDetails = { messageId, senderSession };
+    const abort = new AbortController();
+    const combined = signal ? AbortSignal.any([signal, abort.signal]) : abort.signal;
+    let input: PeerSendInput | undefined;
+    let code: PeerSendErrorCode = "invalid_request";
+    let journaled = false;
+    const done = (async (): Promise<SendOutcome> => {
+      let result: PeerSendResult;
+      try {
+        input = validateInput(value);
+        code = "unavailable";
+        if (!sender || !senderClient || !senderSession) throw new Error("Peloton endpoint is unavailable");
+        code = "busy";
+        if (sends.size >= LIMITS.connections) throw new Error("Peloton active-send limit reached");
+        code = "cancelled";
+        combined.throwIfAborted();
+        code = "send_failed";
+        if (toolCallId === undefined) {
+          pi.appendEntry<SentEntry>(SENT, { messageId, input, senderSession, at: Date.now() });
+          journaled = true;
+        }
+        const sent = await senderClient.send(sender, input.target, input.content, input.delivery, {
+          replyTo: input.replyTo, signal: combined, id: messageId,
+          onEnvelope(envelope) {
+            if (active !== sender) throw new Error("Sender conversation changed");
+            const evicted = outgoing.prepare(envelope);
+            if (evicted) deliveryStatus(evicted.envelope, "untracked", { lastStage: evicted.stage, reason: "evicted" });
+            details.envelope = envelope;
+            const view = toolCallId !== undefined ? sendViews.get(toolCallId) : undefined;
+            if (view) outgoing.watch(messageId, view);
+            deliveryStatus(envelope, "sending");
+            refreshStatus();
+          },
+        });
+        details.receipt = sent.receipt;
+        if (active !== sender) throw new Error("Sender conversation changed; recipient acceptance may have occurred");
+        outgoing.accepted(messageId); // Never regress an early recording update.
+        refreshStatus();
+        const stage = outgoing.get(messageId)?.stage === "recorded" ? "recorded" : "accepted";
+        if (stage === "accepted") deliveryStatus(sent.envelope, stage);
+        result = { messageId, senderSession, ok: true, acceptance: "accepted", stage, acceptedAt: sent.receipt.acceptedAt };
+      } catch (error) {
+        if (sender && active !== sender) code = "session_changed";
+        else if (combined.aborted) code = "cancelled";
+        outgoing.failed(messageId);
+        refreshStatus();
+        details.error = safeText(error instanceof Error ? error.message : String(error));
+        const recorded = outgoing.get(messageId)?.stage === "recorded";
+        result = { messageId, senderSession, ok: false, stage: recorded ? "recorded" : "error",
+          acceptance: recorded || details.receipt ? "accepted" : details.envelope ? "unknown" : "not-sent",
+          error: { code, message: details.error } };
+        if (details.envelope && !recorded) deliveryStatus(details.envelope, "error", { error: details.error });
+      }
+      const outcome = { result, details };
+      if (journaled) {
+        // Keep extension-originated sends durable without adding sender model input.
+        try { pi.appendEntry<SendOutcome>(SEND_RESULT, outcome); }
+        catch {
+          details.error = "Could not persist Peloton send result; recipient acceptance may have occurred";
+          outgoing.failed(messageId);
+          refreshStatus();
+          if (details.envelope && result.stage !== "recorded") deliveryStatus(details.envelope, "error", { error: details.error });
+          result = { messageId, senderSession, ok: false, acceptance: result.acceptance, stage: result.stage === "recorded" ? "recorded" : "error",
+            error: { code: "send_failed", message: details.error } };
+          return { result, details };
+        }
+      }
+      return outcome;
+    })().finally(() => { sends.delete(messageId); });
+    sends.set(messageId, { abort, done });
+    return done;
+  };
+
+  const listen = () => {
+    stopRequests = pi.events.on(PELOTON_SEND, async data => {
+      const request = data as PeerSendRequest | undefined;
+      // Without a valid correlation ID there is no safe response destination.
+      if (!request || !isToken(request.requestId)) return;
+      const messageId = request.requestId;
+      let result: PeerSendResult;
+      if (requests.has(messageId) || sends.has(messageId) || outgoing.get(messageId)) {
+        result = { messageId, ok: false, acceptance: "not-sent", stage: "error",
+          error: { code: "duplicate_request", message: "Request ID already used; no retry was performed" } };
+      } else if (request.signal !== undefined && !(request.signal instanceof AbortSignal)) {
+        result = { messageId, ok: false, acceptance: "not-sent", stage: "error",
+          error: { code: "invalid_request", message: "signal must be an AbortSignal" } };
+      } else {
+        requests.add(messageId);
+        if (requests.size > LIMITS.duplicates) requests.delete(requests.values().next().value!);
+        result = (await send(request.input, messageId, request.signal)).result;
+      }
+      try { pi.events.emit(peerSendResultEvent(messageId), { requestId: messageId, result } satisfies PeerSendResponse); } catch {}
+    });
+  };
 
   const refreshStatus = () => {
     if (!active || !context?.hasUI) return;
@@ -62,7 +192,13 @@ export default function peloton(pi: ExtensionAPI) {
   };
 
   const close = async () => {
+    stopRequests?.();
+    stopRequests = undefined;
     active = undefined;
+    // Settle and journal old-conversation work before abandoning its context.
+    for (const send of sends.values()) send.abort.abort();
+    await Promise.all([...sends.values()].map(send => send.done));
+    requests.clear();
     for (const envelope of inbox?.close() ?? []) {
       const key = messageKey(envelope);
       invalidated.add(key);
@@ -74,7 +210,9 @@ export default function peloton(pi: ExtensionAPI) {
     client = undefined;
     await notifications?.close();
     notifications = undefined;
-    outgoing.clear();
+    for (const discarded of outgoing.clear()) {
+      deliveryStatus(discarded.envelope, "untracked", { lastStage: discarded.stage, reason: "lifecycle" });
+    }
     sendViews.clear();
     await old?.close();
     context?.ui.setStatus("peloton", undefined);
@@ -142,10 +280,13 @@ export default function peloton(pi: ExtensionAPI) {
         pi.appendEntry<DeliveryEvent>(DELIVERY, { kind: "recorded", update, at: Date.now() });
         outgoing.refresh(update.id);
         refreshStatus();
+        const tracked = outgoing.get(update.id)!;
+        deliveryStatus(tracked.envelope, "recorded");
       }
     });
     try {
       await server.start();
+      listen();
       refreshStatus();
     } catch (error) {
       report(error instanceof Error ? error : new Error(String(error)));
@@ -225,6 +366,45 @@ export default function peloton(pi: ExtensionAPI) {
     };
   });
 
+  // One transcript-only card per extension send, updated by normal entry repaints.
+  // Both its result and recording proof are restored from the active branch.
+  pi.registerEntryRenderer<SentEntry>(SENT, (entry, { expanded }, theme) => {
+    const data = entry.data;
+    if (!data) return undefined;
+    return {
+      render(width: number) {
+        const { messageId, input } = data;
+        const branch = context?.sessionManager.getBranch() ?? [];
+        let outcome: SendOutcome | undefined;
+        for (const record of branch) {
+          if (record.type === "custom" && record.customType === SEND_RESULT) {
+            const candidate = record.data as SendOutcome;
+            if (candidate?.result?.messageId === messageId) outcome = candidate;
+          }
+        }
+        const envelope = outcome?.details.envelope;
+        const proof = envelope && branch.some(record => {
+          if (record.type !== "custom" || record.customType !== DELIVERY) return false;
+          const data = record.data as DeliveryEvent;
+          return data?.kind === "recorded" && data.update.id === messageId
+            && sameIdentity(data.update.sender, envelope.recipient) && sameIdentity(data.update.recipient, envelope.sender);
+        });
+        const stage: CardStatus = proof ? "recorded" : outgoing.get(messageId)?.stage ?? outcome?.result.stage ?? "sending";
+        const tone = stage === "recorded" ? "accent" : stage === "error" ? "warning" : "dim";
+        const box = new Box(1, 1, text => theme.bg("customMessageBg", text));
+        box.addChild(new Text(theme.fg(tone, peerHeader("→", input.target, input.delivery, stage)), 0, 0));
+        const error = outcome?.result.ok === false ? outcome.result.error.message : "Send failed";
+        box.addChild(new Text(theme.fg(stage === "recorded" ? "text" : tone, safeText(stage === "error" ? error : input.content)), 0, 0));
+        if (expanded) {
+          box.addChild(new Text(theme.fg("dim", `Message ID: ${safeText(messageId)}${input.replyTo ? ` · reply to: ${safeText(input.replyTo)}` : ""}`), 0, 0));
+          if (stage === "error") box.addChild(new Text(theme.fg("dim", `Original message: ${safeText(input.content)}`), 0, 0));
+        }
+        return box.render(width);
+      },
+      invalidate() {},
+    };
+  });
+
   pi.registerTool({
     name: "peer_send",
     label: "Peer send",
@@ -240,38 +420,15 @@ export default function peloton(pi: ExtensionAPI) {
       replyTo: Type.Optional(Type.String({ pattern: "^[a-zA-Z0-9-]{1,80}$" })),
     }, { additionalProperties: false }),
     async execute(_id, params, signal) {
-      const sender = active;
-      const senderClient = client;
-      if (!sender || !senderClient) throw new Error("Peloton endpoint is unavailable");
-      const messageId = randomUUID();
-      const details: SendDetails = { messageId, senderSession: context?.sessionManager.getSessionId() };
-      try {
-        const result = await senderClient.send(sender, params.target, params.content, params.delivery ?? "followUp", {
-          replyTo: params.replyTo, signal, id: messageId,
-          onEnvelope(envelope) {
-            if (active !== sender) throw new Error("Sender conversation changed");
-            outgoing.prepare(envelope);
-            details.envelope = envelope;
-            const view = sendViews.get(_id);
-            if (view) outgoing.watch(messageId, view);
-            refreshStatus();
-          },
-        });
-        if (active !== sender) throw new Error("Sender conversation changed; recipient acceptance may have occurred");
-        outgoing.accepted(messageId); // Never regress an early recording update.
-        refreshStatus();
-        details.receipt = result.receipt;
-        return {
-          content: [{ type: "text", text: `${peerHeader("→", params.target, result.envelope.delivery, "accepted")}\nMessage ID: ${messageId}` }],
-          details,
-        };
-      } catch (error) {
-        if (active !== sender) throw error;
-        outgoing.failed(messageId);
-        refreshStatus();
-        details.error = safeText(error instanceof Error ? error.message : String(error));
-        return { content: [{ type: "text", text: details.error }], details, isError: true };
+      const { result, details } = await send(params, randomUUID(), signal, _id);
+      if (!result.ok) {
+        if (result.error.code === "unavailable" || result.error.code === "session_changed") throw new Error(result.error.message);
+        return { content: [{ type: "text", text: result.error.message }], details, isError: true };
       }
+      return {
+        content: [{ type: "text", text: `${peerHeader("→", params.target, params.delivery ?? "followUp", "accepted")}\nMessage ID: ${result.messageId}` }],
+        details,
+      };
     },
     renderCall(params, theme, ctx) {
       // A callback can update this row even before its acceptance response arrives.

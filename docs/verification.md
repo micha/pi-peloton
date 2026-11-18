@@ -193,6 +193,48 @@ and contexts without a UI. Status updates do not add model messages. The user
 subsequently reported the new footer working in a live test; no detailed trace
 of that check was independently captured.
 
+## Generic extension integration API — automated checks
+
+`npm run check`, `npm test` (**33 passing tests**), and `git diff --check` pass
+with the pinned Pi 1.0.3 development dependencies. Changed local documentation
+links/assets were checked separately. No personal Pi settings were changed and
+no messages were injected into existing live peers for these checks.
+
+Focused automated coverage in `test/api.test.ts` checks:
+
+- Concurrent request correlation, per-request listener cleanup, missing/disposed
+  buses, deadlines, pre-send and in-flight cancellation, and no retries.
+- All delivery modes, reply-to IDs, sender identity, shared tool/API validation,
+  UTF-8 bounds, unavailable peers, and known-PID replacement rejection.
+- API-only outgoing records/cards, escaped text, content-free status events,
+  duplicate request rejection, recording deduplication, and history restoration.
+- Recording before acceptance, lost acknowledgement after recording, and late
+  recording after an error, without regressive stages or added model messages.
+- Shared active-send bounds, correlation eviction/untracking, cancellation and
+  journaling before session teardown, listener removal/rebinding, and synthetic
+  session-record write failures that return errors rather than hanging callers.
+
+The isolated RPC test additionally loads `test/fixtures/api-consumer.ts` into an
+actual Pi 1.0.3 sender. The consumer deactivates `peer_send` using
+`pi.setActiveTools()`; assertions confirm it remains registered but absent from
+the active tool list, both initially and after session replacement. A command
+still sends a passive message through the public helper, without a sender model
+call. A recipient with the existing deterministic
+provider records it through native Pi events; the sender observes durable
+recording metadata and live status events without receiving custom model input
+or starting a turn. A sender session replacement reloads the consumer/Peloton
+listeners and successfully sends again. These processes use disposable
+settings/runtime directories and no external credentials or model calls.
+
+This is automated/synthetic evidence, **not a new live TUI observation**. API
+outgoing-card behavior is renderer-tested, but its live repaint/editor/focus
+behavior has not been independently exercised. No broader Pi version range,
+sidebar workflow, application session/response-association policy, or
+collaboration-quality benefit is verified here. Existing live-verification gaps
+above remain. `npm ci --ignore-scripts` reports the existing pinned dependency
+advisories: 2 moderate and 1 high (including `minimatch` and `undici`); the target
+versions were not upgraded.
+
 ## Automated checks
 
 At the prototype commit, `npm run check` and all 13 tests passed. The tests cover

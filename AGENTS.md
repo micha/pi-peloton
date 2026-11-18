@@ -77,7 +77,8 @@ intent, automated checks, independent live observations, and user reports.
 
 ## Code and documentation map
 
-- `src/pi-peloton.ts`: lifecycle, `peer_send`, messages, metadata, renderers.
+- `src/pi-peloton.ts`: lifecycle, shared tool/API send path, messages, metadata, renderers.
+- `src/api.ts`: extension-integration types, process-local request/reply helper, status events.
 - `src/protocol.ts`: types, validation, identities, limits, safe text.
 - `src/transport.ts`: private Unix sockets, handshakes, frames, receipts, cleanup.
 - `src/inbox.ts`: inbound admission tracking.
@@ -85,6 +86,7 @@ intent, automated checks, independent live observations, and user reports.
 - `src/presentation.ts`: shared card headers.
 - `test/`: unit/integration tests and isolated RPC checks. Fixtures are test-only.
 - `docs/implementation.md`: contributor reference; keep it synchronized with code.
+- `docs/extension-api.md`: consumer contract/example and association/lifecycle limits.
 - `docs/verification.md`: evidence, method, provenance, and untested cases.
 
 ## Pi integration constraints

@@ -12,7 +12,8 @@ separate from the Pi version; mixed v1/v2 endpoints fail before sending content.
 
 | File | Responsibility |
 | --- | --- |
-| `src/pi-peloton.ts` | Pi lifecycle, tool registration, attributed messages, session metadata, and renderers |
+| `src/pi-peloton.ts` | Pi lifecycle, shared tool/API send path, attributed messages, session metadata, and renderers |
+| `src/api.ts` | Exported process-local extension API types, bounded request/reply helper, and delivery subscription |
 | `src/protocol.ts` | Envelope/control types, validation, identities, limits, and safe text |
 | `src/transport.ts` | PID socket lookup, framed transport, handshakes, receipts, and endpoint cleanup |
 | `src/inbox.ts` | Admission tracking for accepted messages not yet recorded |
@@ -48,6 +49,40 @@ delivery and yielding when only waiting. Each guideline names `peer_send`, since
 Pi inserts them as flat system-prompt bullets. This is delivery guidance, not an
 enforced role or collaboration protocol.
 
+## Programmatic extension sending
+
+The [extension API contract and consumer example](extension-api.md) describe
+`sendPeerMessage(pi.events, input, options?)` and `onPeerDelivery()`. Requests use
+`peloton:send:v1`; replies use a per-request `peloton:send-result:v1:<id>` channel.
+Status observation uses `peloton:delivery:v1`. These are process-local bus events,
+not transport packets, RPC commands, or model messages. API v1 is independent of
+wire protocol v2. `src/api.ts` has no runtime transport or extension-factory import.
+
+Tool and extension sends call one routine for strict input validation, fresh-ID
+correlation, identity checks, transport, aborts, and monotonic outgoing tracking.
+There are at most 16 concurrent active sends across both origins. API request IDs
+are also transport message IDs; the helper generates a fresh UUID for each call.
+A bounded 256-ID recent-request set rejects duplicates, supplemented by active
+sends/live outgoing correlations; this is not durable cross-session idempotency.
+
+The API listener starts only after endpoint startup and is unsubscribed on close.
+Lifecycle cleanup aborts active sends and waits for their results to be journaled
+before abandoning the old context. The helper independently bounds reply waits
+(default 6 seconds), propagates cancellation, and removes its per-request listener
+in `finally`. Missing Peloton, unsupported event versions, or lost replies cannot
+leave helper callers waiting indefinitely. Cancellation/deadline can leave
+acceptance unknown; no entry point retries automatically.
+
+Content-free live status events cover prepared sends and recording, plus explicit
+`untracked` events on correlation eviction/lifecycle clearing. Recording remains
+monotonic even before acceptance or after a lost acknowledgement. A failed result
+can therefore carry proven `recorded`/`accepted` status. Metadata events never
+invoke `pi.sendMessage()` or trigger model turns. Observers do not get replay.
+
+PID targets still address current conversations; neither this API nor `replyTo`
+pins the consumer's original session/response association. That validation and
+any approval or restatement policy belongs to the consumer, not Peloton.
+
 ## Rendering and session records
 
 The footer is `{pid} →{pending_send} ←{pending_receive}`. Outgoing counts include
@@ -76,6 +111,12 @@ acceptance/recording notices.
   update one card rather than duplicate it.
 - `peloton.delivery`: non-model recording-status and notification-failure metadata.
   It has no separate chat renderer and never becomes an inbound prompt.
+- `peloton.sent`: one non-model outgoing card/record for each valid admitted API
+  send, with message ID, normalized input, sender session ID, and timestamp.
+- `peloton.send-result`: API send outcome plus the same envelope/receipt/error
+  details used by the tool. It has no renderer. The sent card reads live tracking
+  and branch result/recording metadata, including after reload; restoration does
+  not recreate live correlations or add model input.
 
 Pi omits custom entries whose renderer returns undefined. Acceptance entries
 therefore retain a component that renders no content when hidden, allowing
@@ -146,12 +187,15 @@ Current constants live in `src/protocol.ts`:
 | UTF-8 message content | 16 KiB |
 | JSONL frame | 24 KiB |
 | Concurrent accepted connections | 16 |
+| Concurrent active sends, tool and extension combined | 16 |
 | Connection deadline | 5 seconds |
 | Accepted messages not yet recorded | 64 |
 | Live outgoing correlations | 256 |
 | Recording notifications, including the active send | 64 |
 | Recording-observation deadline | 5 seconds |
 | Recent accepted packets for duplicate detection | 256 |
+| Recent local extension request IDs | 256 |
+| Extension-helper reply deadline, configurable | 6 seconds |
 
 Identical duplicates return the original receipt; reusing an ID with changed
 fields fails. Eviction and listener restart lose transport duplicate history.
