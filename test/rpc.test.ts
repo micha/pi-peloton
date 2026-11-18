@@ -8,6 +8,7 @@ import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import { PeerClient, PeerServer, socketPath } from "../src/transport.ts";
 import { identity, type RecordedUpdate } from "../src/protocol.ts";
+import type { PelotonConfiguration } from "../src/configuration.ts";
 
 const cli = resolve("node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js");
 function rpc(child: ChildProcessWithoutNullStreams) {
@@ -51,7 +52,7 @@ function rpc(child: ChildProcessWithoutNullStreams) {
   };
 }
 
-test("isolated Pi 1.0.3 API sends work with peer_send inactive, record, rebind and clean up", { timeout: 45000 }, async t => {
+test("isolated Pi 1.0.3 API sends and native recording use advertised PID and dynamic/private routes", { timeout: 45000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), "peloton-rpc-"));
   const runtime = join(root, "run");
   await mkdir(runtime, { mode: 0o700 });
@@ -67,12 +68,13 @@ test("isolated Pi 1.0.3 API sends work with peer_send inactive, record, rebind a
     await rm(root, { recursive: true, force: true });
   });
   const packagePath = resolve(".");
-  async function start(name: string, extraExtensions: string[] = [], extraArgs: string[] = []) {
+  async function start(name: string, extraExtensions: string[] = [], extraArgs: string[] = [], configuration?: PelotonConfiguration) {
     const config = join(root, name);
     // Allowlist environment: no inherited provider credentials or live Pi config.
     const env = {
       PATH: process.env.PATH, HOME: root, XDG_RUNTIME_DIR: runtime,
       PI_CODING_AGENT_DIR: config, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1", PI_TELEMETRY: "0",
+      ...(configuration ? { PI_PELOTON_CONFIG: JSON.stringify(configuration) } : {}),
     };
     // Verify installation only inside disposable settings, never the user's config.
     const install = spawn(process.execPath, [cli, "install", packagePath], { cwd: root, env });
@@ -85,15 +87,27 @@ test("isolated Pi 1.0.3 API sends work with peer_send inactive, record, rebind a
     children.push(child);
     const request = rpc(child);
     await request("get_state");
-    const path = socketPath(join(runtime, "pi-peloton"), child.pid!);
+    const address = configuration?.advertisedPid ?? child.pid!;
+    const path = socketPath(configuration?.runtimeDirectory ?? join(runtime, "pi-peloton"), address);
     await lstat(path);
-    return { child, request, path };
+    return { child, request, path, address };
   }
-  const a = await start("a", [resolve("test/fixtures/api-consumer.ts")]);
-  const b = await start("b", [resolve("test/fixtures/record-peer.ts")], ["--provider", "peloton-test", "--model", "model"]);
-  const client = new PeerClient(join(runtime, "pi-peloton"));
+  const extensions = [resolve("test/fixtures/api-consumer.ts"), resolve("test/fixtures/record-peer.ts")];
+  const provider = ["--provider", "peloton-test", "--model", "model"];
+  const a = await start("a", extensions, provider);
+  const privateDirectory = join(root, "private");
+  // Synthetic advertised PID, not an actual namespace. The launcher is trusted
+  // to supply the real host PID; this checks production extension integration.
+  const b = await start("b", extensions, provider, { version: 1, advertisedPid: 1234567890,
+    runtimeDirectory: privateDirectory, routePolicy: "explicit", routes: [
+      { target: a.address, directory: join(runtime, "pi-peloton") },
+      { target: 34567, directory: join(runtime, "pi-peloton") },
+    ] });
+  await a.request("prompt", { message: `/peloton-test-route ${JSON.stringify({ target: b.address, directory: privateDirectory })}` });
+  assert.equal((await a.request("get_entries")).entries.find((entry: any) => entry.customType === "peloton.test-route").data.ok, true);
+  const client = new PeerClient(privateDirectory);
   const sentByExtension = await a.request("prompt", { message: `/peloton-test-send ${JSON.stringify({
-    target: b.child.pid!, content: "Please review HANDOFF.md, without starting work yet.", delivery: "nextTurn", replyTo: "approved-resolution",
+    target: b.address, content: "Please review HANDOFF.md, without starting work yet.", delivery: "nextTurn", replyTo: "approved-resolution",
   })}` });
   assert.equal(sentByExtension.disposition, "handled");
   const outbound = (await a.request("get_entries")).entries;
@@ -132,7 +146,7 @@ test("isolated Pi 1.0.3 API sends work with peer_send inactive, record, rebind a
     () => unexpectedInputs++, () => {}, resolveRecorded);
   await controller.start();
   t.after(() => controller.close());
-  const recordProbe = await client.send(controllerIdentity, b.child.pid!, "native recording probe", "nextTurn");
+  const recordProbe = await client.send(controllerIdentity, b.address, "native recording probe", "nextTurn");
   const command = await b.request("prompt", { message: "/peloton-test-record" });
   assert.equal(command.disposition, "handled");
   const update = await notification;
@@ -154,12 +168,35 @@ test("isolated Pi 1.0.3 API sends work with peer_send inactive, record, rebind a
   assert.deepEqual(senderEntries.entries.filter((entry: any) => entry.customType === "peloton.test-status"
     && entry.data.messageId === apiResult.messageId).map((entry: any) => entry.data.stage), ["sending", "accepted", "recorded"]);
   assert.ok(!senderEntries.entries.some((entry: any) => entry.type === "custom_message"));
-  // Pi replaces extension runtimes on session changes. The bus API must rebind.
+  // Exercise reversed native recording too: A must route its control back to B.
+  await b.request("prompt", { message: `/peloton-test-send ${JSON.stringify({ target: a.address, content: "reverse private-route probe", delivery: "nextTurn", replyTo: apiResult.messageId })}` });
+  const reverse = (await b.request("get_entries")).entries.find((entry: any) => entry.customType === "peloton.test-send").data;
+  assert.equal(reverse.ok, true);
+  await a.request("prompt", { message: "/peloton-test-record" });
+  for (let i = 0; i < 100 && (await a.request("get_state")).isStreaming; i++) await delay(20);
+  let reverseRecorded = false;
+  for (let i = 0; i < 100 && !reverseRecorded; i++) {
+    reverseRecorded = (await b.request("get_entries")).entries.some((entry: any) => entry.customType === "peloton.delivery"
+      && entry.data.kind === "recorded" && entry.data.update.id === reverse.messageId);
+    if (!reverseRecorded) await delay(20); // Recording control is asynchronous, not a model turn.
+  }
+  assert.equal(reverseRecorded, true);
+  // Revocation on an ordinary host must tombstone, not fall back to its runtime.
+  await a.request("prompt", { message: `/peloton-test-revoke ${b.address}` });
+  await a.request("prompt", { message: `/peloton-test-send ${JSON.stringify({ target: b.address, content: "revoked" })}` });
+  const revoked = (await a.request("get_entries")).entries.filter((entry: any) => entry.customType === "peloton.test-send").at(-1).data;
+  assert.equal(revoked.ok, false);
+  assert.match(revoked.error.message, /revoked.*no fallback/);
+  // Pi replaces extension runtimes on session changes; routes must not replay.
   await a.request("new_session");
-  await a.request("prompt", { message: `/peloton-test-send ${JSON.stringify({ target: b.child.pid!, content: "fresh sender", delivery: "nextTurn" })}` });
+  await a.request("prompt", { message: `/peloton-test-send ${JSON.stringify({ target: b.address, content: "route not restored" })}` });
+  const missingRoute = (await a.request("get_entries")).entries.find((entry: any) => entry.customType === "peloton.test-send").data;
+  assert.equal(missingRoute.ok, false);
+  await a.request("prompt", { message: `/peloton-test-route ${JSON.stringify({ target: b.address, directory: privateDirectory })}` });
+  await a.request("prompt", { message: `/peloton-test-send ${JSON.stringify({ target: b.address, content: "fresh sender", delivery: "nextTurn" })}` });
   const freshSender = (await a.request("get_entries")).entries;
-  assert.equal(freshSender.filter((entry: any) => entry.customType === "peloton.test-send").length, 1);
-  assert.equal(freshSender.find((entry: any) => entry.customType === "peloton.test-send").data.ok, true);
+  assert.equal(freshSender.filter((entry: any) => entry.customType === "peloton.test-send").length, 2);
+  assert.equal(freshSender.filter((entry: any) => entry.customType === "peloton.test-send").at(-1).data.ok, true);
   const freshTools = freshSender.find((entry: any) => entry.customType === "peloton.test-tools").data;
   assert.ok(freshTools.registered.includes("peer_send"));
   assert.ok(!freshTools.active.includes("peer_send"));
@@ -167,7 +204,7 @@ test("isolated Pi 1.0.3 API sends work with peer_send inactive, record, rebind a
   // A human-equivalent conversation switch in the isolated test recipient.
   await b.request("new_session");
   // Session lifecycle awaits new listener creation; PID still locates the peer.
-  await client.send(identity(a.child.pid!), b.child.pid!, "Message for the newly prepared conversation.", "nextTurn");
+  await client.send(identity(a.child.pid!), b.address, "Message for the newly prepared conversation.", "nextTurn");
   const fresh = await b.request("get_entries");
   const received = fresh.entries.filter((entry: any) => entry.customType === "peloton.status" && entry.data.kind === "queued");
   assert.equal(received.length, 1);

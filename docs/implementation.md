@@ -16,6 +16,8 @@ separate from the Pi version; mixed v1/v2 endpoints fail before sending content.
 | `src/api.ts` | Exported process-local extension API types, bounded request/reply helper, and delivery subscription |
 | `src/protocol.ts` | Envelope/control types, validation, identities, limits, and safe text |
 | `src/transport.ts` | PID socket lookup, framed transport, handshakes, receipts, and endpoint cleanup |
+| `src/configuration.ts` | Strict trusted bootstrap parsing and process-local capture across reload |
+| `src/routing.ts` | Session-scoped explicit routes, revocation, tombstones, and bounds |
 | `src/inbox.ts` | Admission tracking for accepted messages not yet recorded |
 | `src/recording.ts` | Outgoing correlations, recording observation, and serial notification queue |
 | `src/presentation.ts` | Shared card-header format |
@@ -130,6 +132,26 @@ to `~/.pi/peloton-runtime/`. The leaf directory must be a real, owner-only
 directory; sockets are mode `0600`. Paths over 100 bytes fail clearly. There is no
 separate registry file: the handshake provides endpoint identity.
 
+Trusted launchers may supply `PI_PELOTON_CONFIG` v1 with an advertised host Pi PID,
+private runtime, and per-PID directory routes. The first valid source is captured
+at session startup and cannot change within the process. Invalid configuration
+or later source changes disable startup visibly, without falling back. Ordinary
+unconfigured startup keeps its existing PID/XDG defaults. See the complete
+[bootstrap/routing contract](namespace-routing.md); Peloton does not discover or
+authenticate the launcher-supplied host PID.
+
+`registerPeerRoute()` installs an owned dynamic route over `peloton:route:v1`;
+its required signal aborts active transports and recording-observation work on
+revocation. A revoked target remains a tombstone until the lifecycle ends. Route
+registration is one-shot, not endpoint replacement or readiness detection.
+Configured and dynamic routes share a 256-target bound, including tombstones.
+One `PeerClient` retains identity memory across default/explicit destinations and
+uses the same resolver for sends and recorded controls. Routed leaves are checked
+without directory creation, supporting existing read-only exports. Queued controls
+fail closed after revocation. Dynamic routes/listeners do not persist or replay;
+old ownership signals cannot affect a new lifecycle. Routing is outbound lookup,
+not an inbound-sender allowlist. No wire identity/correlation check is relaxed.
+
 A process-instance nonce distinguishes PID replacements and survives extension
 reload within that process. A conversation-generation nonce changes with
 `session_start`. First contact with a bare PID means the instance currently at
@@ -196,6 +218,8 @@ Current constants live in `src/protocol.ts`:
 | Recent accepted packets for duplicate detection | 256 |
 | Recent local extension request IDs | 256 |
 | Extension-helper reply deadline, configurable | 6 seconds |
+| Explicit routes, including retired targets | 256 |
+| Trusted bootstrap JSON | 64 KiB |
 
 Identical duplicates return the original receipt; reusing an ID with changed
 fields fails. Eviction and listener restart lose transport duplicate history.

@@ -63,6 +63,11 @@ confirmation approves sending, not actions described by the text.
 ## Helper contract
 
 Exports and full TypeScript definitions live in [`src/api.ts`](../src/api.ts).
+Trusted extensions can also use `registerPeerRoute(events, { target, directory },
+{ signal, timeoutMs? })` to reach a newly launched private endpoint without
+rebinding Peloton. The required signal owns revocation; targets are one-shot per
+lifecycle and never fall back after revocation. This is not a model-facing send
+option. See the [bootstrap/private-routing contract](namespace-routing.md).
 
 ```ts
 sendPeerMessage(events, { target, content, delivery?, replyTo? }, { signal?, timeoutMs? }?)

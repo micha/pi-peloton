@@ -15,8 +15,8 @@ export function socketPath(directory: string, pid: number): string {
   if (Buffer.byteLength(path) > 100) throw new Error("Unix socket path exceeds 100 bytes; use a shorter runtime directory");
   return path;
 }
-export async function privateDirectory(path: string) {
-  await mkdir(path, { recursive: true, mode: 0o700 });
+export async function privateDirectory(path: string, create = true) {
+  if (create) await mkdir(path, { recursive: true, mode: 0o700 });
   const stat = await lstat(path);
   if (!stat.isDirectory() || stat.uid !== process.getuid?.() || (stat.mode & 0o077)) {
     throw new Error("Peloton runtime directory must be a real, owner-only directory");
@@ -146,9 +146,11 @@ export class PeerServer {
   }
 }
 
+export interface PeerEndpoint { directory: string; signal?: AbortSignal }
+
 export class PeerClient {
   private known = new Map<number, string>();
-  constructor(readonly directory: string) {}
+  constructor(readonly directory: string, private resolveRoute?: (target: number) => PeerEndpoint) {}
   async send(sender: Identity, target: number, content: string, delivery: Delivery = "followUp",
     options: { replyTo?: string; id?: string; signal?: AbortSignal; onEnvelope?: (envelope: Envelope) => void } = {}): Promise<{ envelope: Envelope; receipt: Receipt }> {
     const result = await this.exchange(sender, target, recipient => {
@@ -172,8 +174,13 @@ export class PeerClient {
   private async exchange<T extends Packet>(sender: Identity, target: number,
     prepare: (recipient: Identity) => T, signal?: AbortSignal): Promise<{ packet: T; receipt: Receipt }> {
     if (target === sender.pid) throw new Error("Cannot send to this Pi instance");
-    const path = socketPath(this.directory, target);
-    await privateDirectory(this.directory);
+    const endpoint = this.resolveRoute?.(target);
+    const directory = endpoint?.directory ?? this.directory;
+    if (endpoint?.signal) signal = signal ? AbortSignal.any([signal, endpoint.signal]) : endpoint.signal;
+    signal?.throwIfAborted();
+    const path = socketPath(directory, target);
+    // Routed exports may be read-only; never create a routed destination.
+    await privateDirectory(directory, !this.resolveRoute);
     const stat = await lstat(path);
     if (!stat.isSocket() || stat.uid !== process.getuid?.() || (stat.mode & 0o077)) throw new Error("Unsafe peer socket permissions");
     signal?.throwIfAborted();
@@ -195,6 +202,7 @@ export class PeerClient {
       socket.on("error", error => finish(error));
       socket.on("close", () => finish(new Error("Peer disconnected before acknowledgement; acceptance may be unknown")));
       frames(socket, value => {
+        if (settled) return;
         const v = value as Record<string, unknown>;
         if (!v || typeof v !== "object") throw new Error("Malformed response");
         if (v.type === "error") throw new Error(typeof v.error === "string" ? v.error : "Peer rejected message");

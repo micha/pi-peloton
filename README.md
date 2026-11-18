@@ -114,6 +114,11 @@ optional content-free events report later recording. A PID addresses the **curre
 conversation**, not a pinned session or response. See the [consumer example and
 API contract](docs/extension-api.md) for lifecycle cleanup and limitations.
 
+Trusted launchers can opt into an advertised host Pi PID, private runtime, and
+explicit per-PID routes, including revocable post-launch routes. See the
+[bootstrap/routing contract](docs/namespace-routing.md). This does not provide a
+sandbox launcher; actual namespace integration needs separate verification.
+
 ## What you'll see
 
 The status line shows your Pi PID and tracked delivery backlog:
@@ -187,6 +192,7 @@ npm test
 
 - [Verification record](docs/verification.md): tested behavior and remaining gaps.
 - [Extension API](docs/extension-api.md): programmatic sending and delivery events.
+- [Private routing](docs/namespace-routing.md): trusted launcher configuration and route lifetime.
 - [Implementation notes](docs/implementation.md): APIs, transport, limits, and
   lifecycle details.
 - [AGENTS.md](AGENTS.md): instructions for coding agents working on this repository.
