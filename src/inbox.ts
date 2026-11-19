@@ -9,6 +9,13 @@ export class Inbox {
     if (this.pending.size >= LIMITS.pending) throw new Error("Peer pending-message limit reached");
     this.pending.set(messageKey(envelope), envelope);
   }
+  pendingFrom(pid: number) {
+    const counts = { followUp: 0, steer: 0 };
+    for (const { sender, delivery } of this.pending.values()) {
+      if (sender.pid === pid && delivery !== "nextTurn") counts[delivery]++;
+    }
+    return counts;
+  }
   recorded(envelope: Envelope) { this.pending.delete(messageKey(envelope)); }
   close(): Envelope[] {
     const pending = [...this.pending.values()];

@@ -78,8 +78,8 @@ pane PID may belong to a shell rather than the Pi process underneath it.
 
 | Mode | When to use it | Behavior |
 | --- | --- | --- |
-| `followUp` — default | Ordinary collaboration | Wakes an idle peer; waits for ongoing work to finish if busy |
-| `steer` — explicit | Correct ongoing work | Wakes an idle peer; otherwise arrives at Pi's supported turn/tool boundary |
+| `followUp` — default | Messages that can wait until the peer finishes its turn | Wakes an idle peer; waits for ongoing work to finish if busy |
+| `steer` — explicit | Replies, findings, or corrections that could change the peer's next action | Wakes an idle peer; otherwise arrives at Pi's supported turn/tool boundary |
 | `nextTurn` — explicit | Leave context for later | Does not wake the peer; enters the conversation on its next human prompt |
 
 Replies arrive automatically. An agent that has nothing to do but wait can end
@@ -94,6 +94,14 @@ peer_send(target=12345, content="Please review the changes.")
 peer_send(target=12345, content="That assumption is incorrect.", delivery="steer")
 peer_send(target=12345, content="Context for your next prompt.", delivery="nextTurn")
 ```
+
+When another send could depend on a queued reply, use
+`peer_send(target=12345, content="I'll take the next step.", skipIfPendingFromTarget=true)`.
+If this session already has an accepted `followUp` or `steer` from that PID still
+pending delivery, the tool reports counts by mode and does not send. `nextTurn`
+messages and messages from other peers don't block it. This is a local snapshot;
+a reply can still arrive just after the check. The skipped send is not queued or
+retried.
 
 `replyTo` optionally identifies a message being answered. Message content must be
 nonblank and no larger than 16 KiB in UTF-8.
@@ -146,7 +154,8 @@ PEER {←|→} Pi PID {pid} · {delivery} · {status}
   full contrast. The acceptance card hides once the recorded message is visible.
 - Outgoing cards update in place: `sending → accepted → recorded`.
 - **Ctrl-O** reveals acceptance receipts, message IDs, and reply-to metadata.
-- Failed sends and invalidated pending messages are labelled explicitly.
+- Skipped sends show `not sent`. Failed sends and invalidated pending messages
+  are also labelled explicitly.
 
 These are delivery stages, not task-completion states. Recording updates happen
 between extensions without prompting either model. They are best-effort: if a

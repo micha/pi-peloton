@@ -8,6 +8,7 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import peloton from "../src/pi-peloton.ts";
 import { PeerClient, PeerServer, socketPath } from "../src/transport.ts";
+import { onPeerDelivery } from "../src/api.ts";
 import { identity, LIMITS, VERSION, recordingUpdate, type Envelope, type RecordedUpdate } from "../src/protocol.ts";
 
 import { harness } from "./harness.ts";
@@ -104,6 +105,8 @@ test("extension lifecycle, delivery mapping, attribution, limits, literal comman
   assert.equal(h.tools[0].name, "peer_send");
   assert.match(h.tools[0].description, /Replies arrive automatically/);
   const guidance = h.tools[0].promptGuidelines.join("\n");
+  assert.match(guidance, /reply, finding, or correction.*next action.*delivery: "steer"/);
+  assert.match(guidance, /followUp when the message can wait/);
   assert.match(guidance, /No polling or sleep loop/);
   assert.match(guidance, /continue independent work/i);
   assert.ok(h.tools[0].promptGuidelines.every((line: string) => line.includes("peer_send")));
@@ -151,6 +154,84 @@ test("extension lifecycle, delivery mapping, attribution, limits, literal comman
   const failed = await h.tools[0].execute("tool-2", { target: 98765, content: "missing peer" }, undefined);
   assert.equal(failed.isError, true);
   assert.equal(h.statuses.get("peloton"), `${process.pid} →1 ←1`);
+});
+
+test("guarded peer_send skips only while the target has pending active-mode messages", async t => {
+  const root = await mkdtemp(join(tmpdir(), "peloton-send-guard-"));
+  const oldRuntime = process.env.XDG_RUNTIME_DIR;
+  process.env.XDG_RUNTIME_DIR = root;
+  const directory = join(root, "pi-peloton");
+  const h = harness();
+  peloton(h.pi as unknown as ExtensionAPI);
+  const target = identity(34567);
+  const outgoing: Envelope[] = [];
+  const peer = new PeerServer(directory, target, envelope => { outgoing.push(envelope); }, () => {}, () => {});
+  t.after(async () => {
+    await h.emit("session_shutdown");
+    await peer.close();
+    if (oldRuntime === undefined) delete process.env.XDG_RUNTIME_DIR; else process.env.XDG_RUNTIME_DIR = oldRuntime;
+    await rm(root, { recursive: true, force: true });
+  });
+  await h.emit("session_start");
+  await peer.start();
+  let deliveryEvents = 0;
+  t.after(onPeerDelivery(h.pi.events, () => { deliveryEvents++; }));
+  const client = new PeerClient(directory);
+  const tool = h.tools[0];
+  const params = { target: target.pid, content: "outgoing decision", skipIfPendingFromTarget: true };
+  const theme = { fg(_color: string, text: string) { return text; } };
+  const ctx = { args: params, state: {}, toolCallId: "skipped", isError: false };
+
+  await client.send(identity(12345), process.pid, "different peer", "followUp");
+  await client.send(target, process.pid, "passive", "nextTurn");
+  const initial = await tool.execute("no-blockers", params, undefined);
+  assert.equal(initial.details.receipt.type, "accepted");
+  assert.equal(outgoing.length, 1);
+
+  await client.send(target, process.pid, "first queued reply", "followUp");
+  await client.send(target, process.pid, "second queued reply", "followUp");
+  const followUpOnly = await tool.execute("follow-up-only", params, undefined);
+  assert.deepEqual(followUpOnly.details, { pendingFromTarget: { followUp: 2, steer: 0 } });
+  assert.equal(outgoing.length, 1);
+  await client.send(target, process.pid, "queued steer", "steer");
+  const beforeEvents = deliveryEvents;
+  const beforeStatus = h.statuses.get("peloton");
+  const call = tool.renderCall(params, theme, ctx);
+  const skipped = await tool.execute(ctx.toolCallId, params, undefined);
+  assert.ok(!skipped.isError);
+  assert.deepEqual(skipped.details, { pendingFromTarget: { followUp: 2, steer: 1 } });
+  assert.match(skipped.content[0].text, /^Not sent: .*\(followUp: 2, steer: 1\)\.$/);
+  assert.equal(outgoing.length, 1);
+  assert.equal(deliveryEvents, beforeEvents);
+  assert.equal(h.statuses.get("peloton"), beforeStatus);
+  assert.equal(h.messages.length, 5);
+  const expanded = tool.renderResult(skipped, { expanded: true, isPartial: false }, theme, ctx);
+  assert.deepEqual(call.render(120).map((line: string) => line.trimEnd()), [
+    "PEER → Pi PID 34567 · followUp · not sent", skipped.content[0].text,
+  ]);
+  assert.match(expanded.render(120).join("\n"), /Original message: outgoing decision/);
+
+  const unguarded = await tool.execute("unguarded", { target: target.pid, content: "send anyway" }, undefined);
+  assert.equal(unguarded.details.receipt.type, "accepted");
+  assert.equal(outgoing.length, 2);
+  for (const { message } of h.messages.slice(2, 4)) await h.emit("message_end", { message: { ...message, role: "custom" } });
+  const steerOnly = await tool.execute("steer-only", params, undefined);
+  assert.deepEqual(steerOnly.details, { pendingFromTarget: { followUp: 0, steer: 1 } });
+  assert.equal(outgoing.length, 2);
+
+  const { message } = h.messages[4];
+  await h.emit("message_end", { message: { ...message, role: "custom" } });
+  const afterDelivery = await tool.execute("after-delivery", params, undefined);
+  assert.equal(afterDelivery.details.receipt.type, "accepted");
+  assert.equal(outgoing.length, 3);
+
+  await client.send(target, process.pid, "old session only", "followUp");
+  await h.emit("session_shutdown");
+  h.session("session-2");
+  await h.emit("session_start");
+  const afterReset = await tool.execute("after-reset", params, undefined);
+  assert.equal(afterReset.details.receipt.type, "accepted");
+  assert.equal(outgoing.length, 4);
 });
 
 test("recording updates refresh outgoing rows before acceptance, persist invisibly, and survive reload", async t => {

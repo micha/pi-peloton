@@ -321,6 +321,17 @@ profile does not establish a supported Pi version range, a production launcher,
 automatic sidebar recreation, live popup/editor/focus behavior, remote-model
 consumption, application-association validation, or collaboration-quality benefit.
 
+## Opt-in send guard — automated check
+
+An extension harness test with disposable sockets verifies that
+`skipIfPendingFromTarget` skips a send without delivering an outgoing envelope
+or emitting outgoing delivery events, reports pending `followUp` and `steer`
+counts, and shows `not sent` in the card. Other peers and passive messages do not
+block; leaving out the guard preserves the ordinary send path. Native delivery
+simulated by the harness and a session replacement both clear blockers. The
+suite has 41 passing tests. Model use of the guard has not been verified in live
+collaboration.
+
 ## Automated checks
 
 At the prototype commit, `npm run check` and all 13 tests passed. The tests cover

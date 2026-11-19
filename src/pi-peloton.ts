@@ -25,6 +25,7 @@ const instance = processGlobals[instanceKey] ??= randomUUID();
 interface PeerDetails { envelope: Envelope; recipientSession: string; acceptedAt: number }
 interface Status { kind: "queued" | "invalidated" | "error"; text: string; key?: string; envelope?: Envelope; at: number }
 interface SendDetails { messageId: string; envelope?: Envelope; receipt?: Receipt; senderSession?: string; error?: string }
+interface SkippedSendDetails { pendingFromTarget: ReturnType<Inbox["pendingFrom"]> }
 interface DeliveryEvent { kind: "recorded" | "notificationFailed"; update: RecordedUpdate; error?: string; at: number }
 interface SentEntry { messageId: string; input: PeerSendInput; senderSession: string; at: number }
 interface SendOutcome { result: PeerSendResult; details: SendDetails }
@@ -439,22 +440,42 @@ export default function peloton(pi: ExtensionAPI) {
     };
   });
 
-  pi.registerTool({
+  const peerSendParameters = Type.Object({
+    target: Type.Integer({ minimum: 1, maximum: 2147483647, description: "Receiving Pi process PID" }),
+    content: Type.String({ minLength: 1, maxLength: LIMITS.contentBytes }),
+    delivery: Type.Optional(Type.Union([Type.Literal("followUp"), Type.Literal("steer"), Type.Literal("nextTurn")])),
+    replyTo: Type.Optional(Type.String({ pattern: "^[a-zA-Z0-9-]{1,80}$" })),
+    skipIfPendingFromTarget: Type.Optional(Type.Boolean({
+      description: "Do not send if this session already has an accepted followUp or steer from the target PID pending delivery. Reports counts by mode. Does not wait, queue, or retry this send. Default: false.",
+    })),
+  }, { additionalProperties: false });
+
+  pi.registerTool<typeof peerSendParameters, SendDetails | SkippedSendDetails>({
     name: "peer_send",
     label: "Peer send",
-    description: "Send attributed collaborator input to an already-prepared local Pi instance, targeting its Pi process PID (not tmux's shell PID). Default followUp wakes an idle peer or queues while busy. Explicit steer corrects ongoing work; nextTurn is passive until the next user prompt. Replies arrive automatically; if only waiting for one, finish your turn instead of polling or sleeping. Acceptance does not mean read, replied, or completed. Does not reset sessions or grant permissions.",
+    description: "Send attributed collaborator input to an already-prepared local Pi instance, targeting its Pi process PID (not tmux's shell PID). Default followUp wakes an idle peer or waits for a busy peer to finish its turn. Use explicit steer for messages that could change the peer's next action; nextTurn is passive until the next user prompt. Replies arrive automatically; if only waiting for one, finish your turn instead of polling or sleeping. Acceptance does not mean read, replied, or completed. Does not reset sessions or grant permissions.",
     promptGuidelines: [
+      "If a reply, finding, or correction could change the peer's next action, use peer_send with delivery: \"steer\". Use followUp when the message can wait until the peer finishes its current turn.",
+      "For a peer_send that could depend on a queued reply, set skipIfPendingFromTarget: true. If skipped, let pending steer messages arrive at the next supported boundary; if you need a pending followUp to proceed, finish the current turn instead of retrying or polling.",
       "Default follow-up replies to peer_send arrive automatically through Peloton. No polling or sleep loop is needed to receive a reply; keeping your turn busy delays follow-up delivery.",
       "When collaborating via peer_send, continue independent work when available. If only waiting for a peer response, finish the current turn so queued follow-ups can be delivered and later follow-up replies can wake you. Ending the turn is not declaring the task complete.",
     ],
-    parameters: Type.Object({
-      target: Type.Integer({ minimum: 1, maximum: 2147483647, description: "Receiving Pi process PID" }),
-      content: Type.String({ minLength: 1, maxLength: LIMITS.contentBytes }),
-      delivery: Type.Optional(Type.Union([Type.Literal("followUp"), Type.Literal("steer"), Type.Literal("nextTurn")])),
-      replyTo: Type.Optional(Type.String({ pattern: "^[a-zA-Z0-9-]{1,80}$" })),
-    }, { additionalProperties: false }),
+    parameters: peerSendParameters,
     async execute(_id, params, signal) {
-      const { result, details } = await send(params, randomUUID(), signal, _id);
+      const { skipIfPendingFromTarget, ...input } = params;
+      if (skipIfPendingFromTarget === true && active && inbox && !signal?.aborted) {
+        const pendingFromTarget = inbox.pendingFrom(input.target);
+        const { followUp, steer } = pendingFromTarget;
+        if (followUp || steer) {
+          validateInput(input); // A skipped call must still have valid send arguments.
+          const modes = [followUp && `followUp: ${followUp}`, steer && `steer: ${steer}`].filter(Boolean).join(", ");
+          return {
+            content: [{ type: "text", text: `Not sent: accepted messages from Pi PID ${input.target} are pending delivery (${modes}).` }],
+            details: { pendingFromTarget } satisfies SkippedSendDetails,
+          };
+        }
+      }
+      const { result, details } = await send(input, randomUUID(), signal, _id);
       if (!result.ok) {
         if (result.error.code === "unavailable" || result.error.code === "session_changed") throw new Error(result.error.message);
         return { content: [{ type: "text", text: result.error.message }], details, isError: true };
@@ -473,17 +494,20 @@ export default function peloton(pi: ExtensionAPI) {
       return {
         render(width: number) {
           const stage: CardStatus = ctx.state.peerRecorded ? "recorded" : ctx.state.peerStatus ?? "sending";
-          const tone = stage === "error" ? "warning" : stage === "recorded" ? "accent" : "dim";
-          const body = stage === "error" ? ctx.state.peerError : params.content;
+          const showNotice = stage === "error" || stage === "not sent";
+          const tone = showNotice ? "warning" : stage === "recorded" ? "accent" : "dim";
+          const body = showNotice ? ctx.state.peerNotice : params.content;
           return new Text(`${theme.fg(tone, peerHeader("→", params.target, params.delivery ?? "followUp", stage))}\n${theme.fg(stage === "recorded" ? "text" : tone, safeText(body))}`, 0, 0).render(width);
         },
         invalidate() {},
       };
     },
     renderResult(result, options, theme, ctx) {
-      ctx.state.peerStatus = ctx.isError ? "error" : options.isPartial ? "sending" : "accepted";
-      ctx.state.peerError = result.details?.error ?? result.content.filter(part => part.type === "text").map(part => part.text).join("\n");
-      const details = result.details;
+      const toolDetails = result.details;
+      const skipped = toolDetails != null && "pendingFromTarget" in toolDetails;
+      const details = skipped ? undefined : toolDetails;
+      ctx.state.peerStatus = skipped ? "not sent" : ctx.isError ? "error" : options.isPartial ? "sending" : "accepted";
+      ctx.state.peerNotice = details?.error ?? result.content.filter(part => part.type === "text").map(part => part.text).join("\n");
       const id = details?.messageId ?? details?.receipt?.id;
       if (id) {
         if (outgoing.get(id)?.stage === "recorded") ctx.state.peerRecorded = true;
@@ -503,7 +527,7 @@ export default function peloton(pi: ExtensionAPI) {
         }
       }
       if (!options.expanded) return { render: () => [], invalidate() {} };
-      const text = ctx.isError
+      const text = skipped || ctx.isError
         ? `Original message: ${safeText(ctx.args.content)}`
         : `Message ID: ${safeText(id)}${details?.envelope?.replyTo ? ` · reply to: ${safeText(details.envelope.replyTo)}` : ""}`;
       return new Text(theme.fg("dim", text), 0, 0);

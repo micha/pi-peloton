@@ -46,10 +46,18 @@ status. Its details retain the envelope, recipient Pi session ID, and acceptance
 time. Peer input is never relabelled as a human message or interpreted as a slash
 command.
 
-The tool description and active-tool `promptGuidelines` explain automatic reply
-delivery and yielding when only waiting. Each guideline names `peer_send`, since
-Pi inserts them as flat system-prompt bullets. This is delivery guidance, not an
-enforced role or collaboration protocol.
+The tool description and active-tool `promptGuidelines` recommend explicit
+steering for messages that could change the peer's next action and follow-up for
+messages that can wait. They also explain automatic reply delivery and yielding
+when only waiting. Each guideline names `peer_send`, since Pi inserts them as
+flat system-prompt bullets. This is guidance; the default remains follow-up.
+
+The model tool's optional `skipIfPendingFromTarget` checks the current local
+`Inbox` before starting transport. It counts accepted `followUp` and `steer`
+messages by sender PID; passive messages do not block. A skip returns counts only,
+with no outgoing envelope, delivery event, or retry. It does not drain or modify
+Pi's queues, and cannot see messages that arrive after the check. The extension
+send API and wire protocol are unchanged.
 
 ## Programmatic extension sending
 
