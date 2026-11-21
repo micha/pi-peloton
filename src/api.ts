@@ -21,6 +21,7 @@ export type PelotonEvents = ExtensionAPI["events"];
 export interface PeerSendInput {
   target: number;
   content: string;
+  /** Includes passive nextTurn (API/wire-only); drain timing depends on Pi version. */
   delivery?: Delivery;
   replyTo?: string;
 }

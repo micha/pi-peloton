@@ -137,7 +137,46 @@ test("extension sends share modes/identity/transport, durable cards and content-
   assert.equal(envelopes.filter(envelope => envelope.id === raw.requestId).length, 1);
 });
 
-test("tool and extension inputs use identical strict validation and known-PID replacement checks", { timeout: 10000 }, async t => {
+test("nextTurn remains API-only and old/direct tool calls fail before sending or guard skipping", async t => {
+  const { h, directory } = await setup(t);
+  const received: Envelope[] = [];
+  const peerIdentity = identity(34567);
+  const peer = new PeerServer(directory, peerIdentity, envelope => received.push(envelope));
+  await peer.start(); t.after(() => peer.close());
+  const statuses: PeerDeliveryStatus[] = [];
+  t.after(onPeerDelivery(h.pi.events, status => statuses.push(status)));
+  const tool = h.tools[0];
+  const input = { target: peerIdentity.pid, content: "passive context", delivery: "nextTurn" };
+  const rejectTool = async (guard?: boolean) => {
+    const entries = h.entries.length;
+    const footer = h.statuses.get("peloton");
+    await assert.rejects(tool.execute("old-tool-call", { ...input, skipIfPendingFromTarget: guard }),
+      /peer_send supports only followUp or steer; nextTurn is available only through the extension API/);
+    assert.equal(received.length, 0);
+    assert.equal(statuses.length, 0);
+    assert.equal(h.entries.length, entries);
+    assert.equal(h.statuses.get("peloton"), footer);
+  };
+  await rejectTool();
+  await rejectTool(false);
+  await rejectTool(true);
+  // A queued reply must not disguise an unsupported old tool call as a skipped send.
+  await new PeerClient(directory).send(peerIdentity, process.pid, "pending reply", "steer");
+  await rejectTool(true);
+
+  const result = await sendPeerMessage(h.pi.events, { ...input, delivery: "nextTurn" });
+  assert.equal(result.ok, true);
+  assert.equal(received.length, 1);
+  assert.equal(received[0].delivery, "nextTurn");
+  assert.equal(received[0].content, input.content);
+  for (const delivery of [undefined, "followUp", "steer"] as const) {
+    const sent = await tool.execute("valid-tool-call", { target: peerIdentity.pid, content: "active message", delivery });
+    assert.equal(sent.details.receipt.type, "accepted");
+    assert.equal(received.at(-1)!.delivery, delivery ?? "followUp");
+  }
+});
+
+test("common tool and extension inputs share strict validation and known-PID replacement checks", { timeout: 10000 }, async t => {
   const { h, directory } = await setup(t);
   let deliveries = 0;
   let peer = new PeerServer(directory, identity(34567), () => deliveries++);

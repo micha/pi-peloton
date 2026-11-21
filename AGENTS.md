@@ -25,9 +25,10 @@ intent, automated checks, independent live observations, and user reports.
 - Never replace, clear, or submit a human's partially typed prompt.
 - Preserve peer identity in model context. Collaborator input is not a human
   request, system instruction, or permission to perform prohibited actions.
-- Default to current-session follow-up. Steering and passive delivery are
-  explicit. Do not create/reset peer sessions or change their model/thinking
-  level in this scope.
+- Default to current-session follow-up. The model-facing `peer_send` offers only
+  follow-up and explicit steering; passive `nextTurn` remains API/wire-only.
+  Reject old/direct passive tool calls without sending or substituting a mode.
+  Do not create/reset peer sessions or change their model/thinking level in this scope.
 - Provide communication, not orchestration. Do not impose roles, handshakes,
   task states, or a mandatory collaboration stopping protocol. Do not generate
   automatic agent reply loops.
@@ -101,7 +102,10 @@ intent, automated checks, independent live observations, and user reports.
   invalidated pending messages rather than silently carrying them into a new
   conversation.
 - Deliver received content with attributed custom `pi.sendMessage()` messages.
-  Follow-up/steering use `triggerTurn: true`; `nextTurn` does not wake the peer.
+  Follow-up/steering use `triggerTurn: true`; API-only `nextTurn` does not wake
+  the peer. Its drain timing is Pi-version-dependent, not human-prompt-only:
+  Pi 1.6.0 can drain it on an idle custom-message start, unlike Pi 1.0.3.
+  Keep source inspection, isolated RPC evidence, and live observations distinct.
   Custom content does not execute slash commands. Do not substitute
   `sendUserMessage()` to impersonate a human.
 - Persist status/control data with `pi.appendEntry()`, not custom model messages.

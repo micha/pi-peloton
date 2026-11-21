@@ -78,9 +78,11 @@ onPeerDelivery(events, listener)
 
 - `target`: receiving **Pi process PID**, integer 1–2147483647, not a tmux shell PID.
 - `content`: nonblank, at most 16 KiB UTF-8. Unknown input fields fail validation.
-- `delivery`: `followUp` by default; explicit `steer` or `nextTurn` have exactly the
-  [tool's semantics](../README.md#delivery-modes). `replyTo` is an optional 1–80
-  character alphanumeric/hyphen message ID, not a routing or authorization token.
+- `delivery`: `followUp` by default; explicit `steer` has the
+  [tool's semantics](../README.md#delivery-modes). The API additionally accepts
+  passive `nextTurn` context, which is not a model-tool choice; see below.
+  `replyTo` is an optional 1–80 character alphanumeric/hyphen message ID, not a
+  routing or authorization token.
 - Every helper call allocates a fresh `messageId`, also used as its request ID.
   `senderSession` identifies the local Pi session when available, not the recipient.
 - `ok: true` means an acceptance receipt arrived. `acceptance` is `accepted`,
@@ -109,6 +111,34 @@ their existing result details/cards; both entry points share sending logic and
 bounds. Neither an outbound API call nor a delivery-status update adds sender
 model input or starts a sender turn. Actual peer content follows the requested
 recipient delivery mode.
+
+## Passive context (`nextTurn`)
+
+`sendPeerMessage(..., { target, content, delivery: "nextTurn" })` leaves passive
+context without waking the recipient. The wire protocol and incoming/history
+renderers also retain this mode. `peer_send` exposes only `followUp` and `steer`;
+old/direct tool calls requesting `nextTurn` fail without sending or substituting
+another mode.
+
+Pi owns the passive queue, and its drain conditions differ by version:
+
+| Pi version | After a normal user prompt | After `followUp` or `steer` wakes an idle peer |
+| --- | --- | --- |
+| 1.0.3 | Recorded after the user message, before the assistant response | Remains queued until a subsequent user prompt |
+| 1.6.0 | Recorded after the user message, before the assistant response | Recorded after the waking peer message, before the assistant response |
+
+Thus an older passive note can appear after a newer waking message. It is not
+converted to a follow-up, does not request a separate run, and is **not** a
+human-prompt-only guarantee. In Pi 1.6.0 source, new-run preparation drains this
+queue for user or custom-message starts; steering/follow-up delivery within an
+already-running peer is a different path, not a guaranteed drain boundary.
+
+The table is covered by an isolated deterministic RPC probe for those two exact
+versions, not a live TUI check or a supported-version range. Other versions and
+busy/retry/compaction/lifecycle interleavings need separate verification. See the
+[verification record](verification.md#two-mode-model-tool-and-passive-delivery-correction--2026-11-21).
+Use passive context only where these deferred/reordered delivery semantics are
+acceptable, not for active coordination.
 
 ## Delivery observation
 

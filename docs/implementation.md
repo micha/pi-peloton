@@ -25,20 +25,30 @@ separate from the Pi version; mixed v1/v2 endpoints fail before sending content.
 
 ## Pi message delivery
 
-`peer_send` takes a receiving Pi PID, content, optional delivery mode, and optional
-reply-to ID. It sends only to the peer's current conversation. Socket paths and
-process-instance nonces are not model-facing arguments.
+`peer_send` takes a receiving Pi PID, content, optional `followUp`/`steer` delivery
+mode, and optional reply-to ID. Follow-up remains the default. Its schema excludes
+`nextTurn`, and a pre-send execution check also rejects old/direct tool calls
+requesting it, even before the pending-reply guard. No mode is silently substituted.
+The extension API and wire protocol still accept all three modes; incoming and
+historical passive cards remain renderable. Sends target only the peer's current
+conversation. Socket paths and process-instance nonces are not model-facing
+arguments.
 
 | Delivery | `pi.sendMessage()` options |
 | --- | --- |
 | Follow-up | `deliverAs: "followUp", triggerTurn: true` |
 | Steering | `deliverAs: "steer", triggerTurn: true` |
-| Passive | `deliverAs: "nextTurn"` |
+| Passive (API/wire only) | `deliverAs: "nextTurn"` |
 
 `triggerTurn` is a per-call option, not a global setting. True wakes an idle
 recipient and preserves queued delivery when busy. Explicit false while busy
-does not queue a follow-up/steering response. `nextTurn` ignores it and waits for
-a user prompt.
+does not queue a follow-up/steering response. `nextTurn` ignores it and leaves
+passive context queued without waking the recipient. Queue drain is Pi-owned and
+version-dependent: Pi 1.0.3 retains it through idle peer wakeups until a user
+prompt; Pi 1.6.0 also drains it when a custom message starts a new idle run. On
+either version's normal user-prompt path it follows the user message; on Pi 1.6.0's
+custom-start path it follows the waking message. See the tested
+[passive-context contract](extension-api.md#passive-context-nextturn) and its limits.
 
 Received content is a custom `peloton.peer` message. Its model-visible prefix
 identifies the sender PID, message ID, optional reply-to ID, and collaborator
@@ -47,10 +57,21 @@ time. Peer input is never relabelled as a human message or interpreted as a slas
 command.
 
 The tool description and active-tool `promptGuidelines` recommend explicit
-steering for messages that could change the peer's next action and follow-up for
-messages that can wait. They also explain automatic reply delivery and yielding
-when only waiting. Each guideline names `peer_send`, since Pi inserts them as
-flat system-prompt bullets. This is guidance; the default remains follow-up.
+steering for messages that could change the peer's next action, including
+nonurgent design/review findings needed during ongoing work. Busy follow-up waits
+until the receiving agent yields: ends its current run with a final response,
+not merely finishes a tool or subtask. The sender yielding does not deliver its
+outgoing messages. An idle recipient wakes immediately, and newer steering
+messages may overtake queued follow-ups.
+
+Contrasting model-tool examples cover an acknowledgement needed to proceed
+(`steer`) and a separate unrelated documentation review that can wait until the
+receiving agent ends its current run and yields (`followUp`). Passive-mode advice
+is not added to model-tool guidance. Waiting/guard guidance also defines yielding
+as ending the run rather than continuing tool calls, so incoming follow-ups can
+arrive; this does not declare the task complete. Each guideline names `peer_send`,
+since Pi inserts them as flat system-prompt bullets. Mode availability is enforced;
+content-based selection between follow-up and steering remains guidance.
 
 The model tool's optional `skipIfPendingFromTarget` checks the current local
 `Inbox` before starting transport. It counts accepted `followUp` and `steer`
@@ -68,8 +89,10 @@ Status observation uses `peloton:delivery:v1`. These are process-local bus event
 not transport packets, RPC commands, or model messages. API v1 is independent of
 wire protocol v2. `src/api.ts` has no runtime transport or extension-factory import.
 
-Tool and extension sends call one routine for strict input validation, fresh-ID
-correlation, identity checks, transport, aborts, and monotonic outgoing tracking.
+Tool and extension sends call one routine for common strict input validation,
+fresh-ID correlation, identity checks, transport, aborts, and monotonic outgoing
+tracking. The tool additionally restricts delivery to follow-up/steering before
+that routine; the programmatic API's passive mode is unchanged.
 There are at most 16 concurrent active sends across both origins. API request IDs
 are also transport message IDs; the helper generates a fresh UUID for each call.
 A bounded 256-ID recent-request set rejects duplicates, supplemented by active

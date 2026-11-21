@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtemp, mkdir, rm, lstat, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import { PeerClient, PeerServer, socketPath } from "../src/transport.ts";
@@ -16,6 +16,7 @@ function rpc(child: ChildProcessWithoutNullStreams) {
   let sequence = 0;
   const pending = new Map<string, { resolve: (value: any) => void; reject: (error: Error) => void }>();
   let diagnostics = "";
+  let onSettled: ((error?: Error) => void) | undefined;
   child.stderr.on("data", chunk => diagnostics += chunk);
   child.stdout.on("data", chunk => {
     buffer += chunk;
@@ -24,6 +25,7 @@ function rpc(child: ChildProcessWithoutNullStreams) {
       const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
       try {
         const value = JSON.parse(line);
+        if (value.type === "agent_settled") onSettled?.();
         if (value.type === "response") {
           const request = pending.get(value.id);
           pending.delete(value.id);
@@ -33,10 +35,12 @@ function rpc(child: ChildProcessWithoutNullStreams) {
     }
   });
   child.on("exit", () => {
-    for (const request of pending.values()) request.reject(new Error(`Pi exited: ${diagnostics}`));
+    const error = new Error(`Pi exited: ${diagnostics}`);
+    for (const request of pending.values()) request.reject(error);
     pending.clear();
+    onSettled?.(error);
   });
-  return async (type: string, extra = {}) => {
+  const request = async (type: string, extra = {}) => {
     const id = `req-${++sequence}`;
     return new Promise<any>((resolveRequest, reject) => {
       const timer = setTimeout(() => {
@@ -50,6 +54,18 @@ function rpc(child: ChildProcessWithoutNullStreams) {
       child.stdin.write(JSON.stringify({ id, type, ...extra }) + "\n");
     });
   };
+  return Object.assign(request, {
+    async settledAfter(action: () => Promise<unknown>) {
+      assert.equal(onSettled, undefined);
+      let timer: NodeJS.Timeout | undefined;
+      const settled = new Promise<void>((resolveSettled, reject) => {
+        timer = setTimeout(() => reject(new Error(`No agent_settled event: ${diagnostics}`)), 15000);
+        onSettled = error => error ? reject(error) : resolveSettled();
+      });
+      try { await Promise.all([settled, Promise.resolve().then(action)]); }
+      finally { clearTimeout(timer); onSettled = undefined; }
+    },
+  });
 }
 
 test("isolated Pi 1.0.3 API sends and native recording use advertised PID and dynamic/private routes", { timeout: 45000 }, async t => {
@@ -216,4 +232,93 @@ test("isolated Pi 1.0.3 API sends and native recording use advertised PID and dy
     assert.equal((await exited)[0], 0);
     await assert.rejects(lstat(peer.path), { code: "ENOENT" });
   }
+});
+
+test("isolated passive nextTurn ordering under human and idle-peer wakeups", { timeout: 30000 }, async t => {
+  // Optional compatibility probe; the normal suite still uses the pinned Pi CLI.
+  const probeCli = process.env.PI_PELOTON_TEST_CLI ? resolve(process.env.PI_PELOTON_TEST_CLI) : cli;
+  const version = JSON.parse(await readFile(resolve(dirname(probeCli), "../../package.json"), "utf8")).version;
+  assert.ok(version === "1.0.3" || version === "1.6.0", `No nextTurn expectation defined for Pi ${version}`);
+  t.diagnostic(`nextTurn probe: Pi ${version}, CLI ${probeCli}`);
+  const root = await mkdtemp(join(tmpdir(), "peloton-next-turn-"));
+  const runtime = join(root, "run");
+  await mkdir(runtime, { mode: 0o700 });
+  // Raw RPC deliberately uses an allowlisted child environment, not inherited credentials.
+  const child = spawn(process.execPath, [probeCli, "--mode", "rpc", "--no-session", "--no-extensions",
+    "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-builtin-tools",
+    "-e", resolve("src/pi-peloton.ts"), "-e", resolve("test/fixtures/record-peer.ts"),
+    "--provider", "peloton-test", "--model", "model"], {
+    cwd: root,
+    env: { PATH: process.env.PATH, HOME: root, XDG_RUNTIME_DIR: runtime,
+      PI_CODING_AGENT_DIR: join(root, "settings"), PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1", PI_TELEMETRY: "0" },
+  });
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = once(child, "exit");
+      const timer = setTimeout(() => child.kill("SIGKILL"), 2000);
+      child.kill("SIGTERM");
+      try { await exited; } finally { clearTimeout(timer); }
+    }
+    await rm(root, { recursive: true, force: true });
+  });
+  const request = rpc(child);
+  await request("get_state");
+  const directory = join(runtime, "pi-peloton");
+  const recipient = child.pid!;
+  await lstat(socketPath(directory, recipient));
+  const sender = identity(34567);
+  const controller = new PeerServer(directory, sender, () => assert.fail("Unexpected peer model input"), () => {}, () => {});
+  await controller.start(); t.after(() => controller.close());
+  const client = new PeerClient(directory);
+  const modelMessages = (entries: any[]) => entries.filter(entry => entry.type === "custom_message"
+    || (entry.type === "message" && entry.message.role !== "system"));
+  const peerIndex = (messages: any[], id: string) => messages.findIndex(entry => entry.type === "custom_message"
+    && entry.customType === "peloton.peer" && entry.details?.envelope?.id === id);
+  const userIndex = (messages: any[], text: string) => messages.findIndex(entry => entry.type === "message"
+    && entry.message.role === "user" && entry.message.content.some((part: any) => part.text === text));
+
+  for (const trigger of ["human", "followUp", "steer"] as const) {
+    if (trigger !== "human") await request("new_session");
+    const passive = await client.send(sender, recipient, `passive context before ${trigger}`, "nextTurn");
+    assert.equal((await request("get_state")).isStreaming, false);
+    const before = (await request("get_entries")).entries;
+    assert.equal(peerIndex(modelMessages(before), passive.envelope.id), -1);
+    assert.equal(before.filter((entry: any) => entry.customType === "peloton.test-model").length, 0);
+    let wakeId = "";
+    const humanPrompt = `human prompt for ${trigger}`;
+    await request.settledAfter(async () => {
+      if (trigger === "human") return request("prompt", { message: humanPrompt });
+      const wake = await client.send(sender, recipient, `idle wake via ${trigger}`, trigger);
+      wakeId = wake.envelope.id;
+    });
+    let after = (await request("get_entries")).entries;
+    assert.equal(after.filter((entry: any) => entry.customType === "peloton.test-model").length, 1);
+    let messages = modelMessages(after);
+    const start = trigger === "human" ? userIndex(messages, humanPrompt) : peerIndex(messages, wakeId);
+    assert.ok(start >= 0);
+    if (trigger === "human" || version === "1.6.0") {
+      assert.equal(peerIndex(messages, passive.envelope.id), start + 1);
+      assert.equal(messages[start + 2].message.role, "assistant");
+    } else {
+      assert.equal(peerIndex(messages, passive.envelope.id), -1);
+      // Pi 1.0.3 keeps passive context queued through an idle peer wakeup.
+      await request.settledAfter(() => request("prompt", { message: humanPrompt }));
+      after = (await request("get_entries")).entries;
+      messages = modelMessages(after);
+      const human = userIndex(messages, humanPrompt);
+      assert.ok(human >= 0);
+      assert.equal(peerIndex(messages, passive.envelope.id), human + 1);
+      assert.equal(messages[human + 2].message.role, "assistant");
+      assert.equal(after.filter((entry: any) => entry.customType === "peloton.test-model").length, 2);
+    }
+    assert.equal(messages.filter(entry => entry.type === "custom_message"
+      && entry.details?.envelope?.id === passive.envelope.id).length, 1);
+    assert.equal((await request("get_state")).isStreaming, false);
+    t.diagnostic(`${trigger}: passive context ${trigger === "human" || version === "1.6.0"
+      ? "recorded immediately after the starting message" : "deferred until a subsequent human prompt"}`);
+  }
+  const exited = once(child, "exit");
+  child.stdin.end();
+  assert.equal((await exited)[0], 0);
+  await assert.rejects(lstat(socketPath(directory, recipient)), { code: "ENOENT" });
 });

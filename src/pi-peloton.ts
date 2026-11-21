@@ -443,7 +443,7 @@ export default function peloton(pi: ExtensionAPI) {
   const peerSendParameters = Type.Object({
     target: Type.Integer({ minimum: 1, maximum: 2147483647, description: "Receiving Pi process PID" }),
     content: Type.String({ minLength: 1, maxLength: LIMITS.contentBytes }),
-    delivery: Type.Optional(Type.Union([Type.Literal("followUp"), Type.Literal("steer"), Type.Literal("nextTurn")])),
+    delivery: Type.Optional(Type.Union([Type.Literal("followUp"), Type.Literal("steer")])),
     replyTo: Type.Optional(Type.String({ pattern: "^[a-zA-Z0-9-]{1,80}$" })),
     skipIfPendingFromTarget: Type.Optional(Type.Boolean({
       description: "Do not send if this session already has an accepted followUp or steer from the target PID pending delivery. Reports counts by mode. Does not wait, queue, or retry this send. Default: false.",
@@ -453,16 +453,21 @@ export default function peloton(pi: ExtensionAPI) {
   pi.registerTool<typeof peerSendParameters, SendDetails | SkippedSendDetails>({
     name: "peer_send",
     label: "Peer send",
-    description: "Send attributed collaborator input to an already-prepared local Pi instance, targeting its Pi process PID (not tmux's shell PID). Default followUp wakes an idle peer or waits for a busy peer to finish its turn. Use explicit steer for messages that could change the peer's next action; nextTurn is passive until the next user prompt. Replies arrive automatically; if only waiting for one, finish your turn instead of polling or sleeping. Acceptance does not mean read, replied, or completed. Does not reset sessions or grant permissions.",
+    description: "Send attributed collaborator input to an already-prepared local Pi instance, targeting its Pi process PID (not tmux's shell PID). Default followUp wakes an idle peer; for a busy peer it waits until the receiving agent yields (ends its current run with a final response), not merely finishes a tool or subtask. Use explicit steer for messages that could change the peer's next action. Replies arrive automatically; if only waiting for one, yield by ending your current run with a final response instead of polling or sleeping. Acceptance does not mean read, replied, or completed. Does not reset sessions or grant permissions.",
     promptGuidelines: [
-      "If a reply, finding, or correction could change the peer's next action, use peer_send with delivery: \"steer\". Use followUp when the message can wait until the peer finishes its current turn.",
-      "For a peer_send that could depend on a queued reply, set skipIfPendingFromTarget: true. If skipped, let pending steer messages arrive at the next supported boundary; if you need a pending followUp to proceed, finish the current turn instead of retrying or polling.",
-      "Default follow-up replies to peer_send arrive automatically through Peloton. No polling or sleep loop is needed to receive a reply; keeping your turn busy delays follow-up delivery.",
-      "When collaborating via peer_send, continue independent work when available. If only waiting for a peer response, finish the current turn so queued follow-ups can be delivered and later follow-up replies can wake you. Ending the turn is not declaring the task complete.",
+      "If a reply, finding, or correction could change the peer's next action, use peer_send with delivery: \"steer\". This includes design/review findings needed during ongoing work, even if not urgent. Example: \"Acknowledged; I'll leave that file to you.\" uses steer when the peer needs that acknowledgement to proceed.",
+      "Use peer_send with delivery: \"followUp\" only if the message can safely wait until the receiving agent yields (ends its current run with a final response). Finishing a tool or subtask does not deliver it; newer steer messages may overtake it. The receiver must yield, not the sender. An idle receiver wakes immediately. Example: \"After you finish your current run and yield, please start a separate review of these unrelated documentation changes.\"",
+      "For a peer_send that could depend on a queued reply, set skipIfPendingFromTarget: true. If skipped, let pending steer messages arrive at the next supported boundary; if you need a pending followUp to proceed, yield by ending your current run instead of retrying or polling.",
+      "Default follow-up replies to peer_send arrive automatically through Peloton. No polling or sleep loop is needed to receive a reply; keeping your own run busy delays incoming follow-up delivery.",
+      "When collaborating via peer_send, continue independent work when available. If only waiting for a peer response, yield by ending your current run with a final response instead of more tool calls, so queued follow-ups can be delivered and later follow-up replies can wake you. Ending the run is not declaring the task complete.",
     ],
     parameters: peerSendParameters,
     async execute(_id, params, signal) {
       const { skipIfPendingFromTarget, ...input } = params;
+      // Fail closed for old/direct tool calls too; never silently change delivery.
+      if ((input as PeerSendInput).delivery === "nextTurn") {
+        throw new Error("peer_send supports only followUp or steer; nextTurn is available only through the extension API.");
+      }
       if (skipIfPendingFromTarget === true && active && inbox && !signal?.aborted) {
         const pendingFromTarget = inbox.pendingFrom(input.target);
         const { followUp, steer } = pendingFromTarget;

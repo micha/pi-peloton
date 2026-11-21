@@ -5,7 +5,7 @@ terminal UI. Peloton provides local messaging between already-running Pi
 instances without typing into anyone's prompt editor.
 
 **Experimental prototype:** developed and tested with Pi **1.0.3 on Unix** and
-Node.js **22.19 or newer**. Other Pi versions are not yet verified.
+Node.js **22.19 or newer**. Broader Pi-version compatibility is not yet verified.
 
 ## Why Peloton?
 
@@ -76,32 +76,38 @@ pane PID may belong to a shell rather than the Pi process underneath it.
 
 ### Delivery modes
 
+The model-facing `peer_send` tool offers two modes:
+
 | Mode | When to use it | Behavior |
 | --- | --- | --- |
-| `followUp` — default | Messages that can wait until the peer finishes its turn | Wakes an idle peer; waits for ongoing work to finish if busy |
+| `followUp` — default | Messages that can wait until the receiving agent yields | Wakes an idle peer; if busy, waits until it ends its current run with a final response |
 | `steer` — explicit | Replies, findings, or corrections that could change the peer's next action | Wakes an idle peer; otherwise arrives at Pi's supported turn/tool boundary |
-| `nextTurn` — explicit | Leave context for later | Does not wake the peer; enters the conversation on its next human prompt |
 
-Replies arrive automatically. An agent that has nothing to do but wait can end
-its current turn and resume when a follow-up arrives. Sleep/polling loops keep it
-busy and can delay those replies. Ending a turn is not declaring the task done;
-independent work can continue while a peer is working.
+For busy `followUp` delivery, the **receiving agent** must yield; the sender
+yielding does not deliver its outgoing messages. Finishing a tool or subtask is
+not enough, and newer `steer` messages can overtake queued follow-ups. Use `steer`
+for design/review findings needed during ongoing work, even if they are not urgent.
+
+Replies arrive automatically. An agent that has nothing to do but wait can yield
+by ending its current run with a final response instead of more tool calls, then
+resume when a follow-up arrives. Sleep/polling loops keep it busy and can delay
+those incoming replies. Yielding is not declaring the task done; independent
+work can continue while a peer is working.
 
 For reference, tool calls look like:
 
 ```text
 peer_send(target=12345, content="Please review the changes.")
 peer_send(target=12345, content="That assumption is incorrect.", delivery="steer")
-peer_send(target=12345, content="Context for your next prompt.", delivery="nextTurn")
 ```
 
 When another send could depend on a queued reply, use
 `peer_send(target=12345, content="I'll take the next step.", skipIfPendingFromTarget=true)`.
 If this session already has an accepted `followUp` or `steer` from that PID still
-pending delivery, the tool reports counts by mode and does not send. `nextTurn`
-messages and messages from other peers don't block it. This is a local snapshot;
-a reply can still arrive just after the check. The skipped send is not queued or
-retried.
+pending delivery, the tool reports counts by mode and does not send. Incoming
+API-only passive messages and messages from other peers don't block it. This is
+a local snapshot; a reply can still arrive just after the check. The skipped send
+is not queued or retried.
 
 `replyTo` optionally identifies a message being answered. Message content must be
 nonblank and no larger than 16 KiB in UTF-8.
@@ -117,9 +123,13 @@ const result = await sendPeerMessage(pi.events, { target: 12345, content: "Appro
 ```
 
 Load Peloton in the sending process too. The API shares the tool's transport,
-validation, attribution, and session records. It returns acceptance/errors;
-optional content-free events report later recording. A PID addresses the **current
-conversation**, not a pinned session or response. See the [consumer example and
+common input validation, attribution, and session records. It additionally supports
+passive `nextTurn` context, which never wakes the peer by itself. Its delivery
+timing depends on Pi version; it is **not** a human-prompt-only guarantee. The
+model-facing tool does not accept it. See the
+[passive-context contract](docs/extension-api.md#passive-context-nextturn).
+The API returns acceptance/errors; optional content-free events report later
+recording. A PID addresses the **current conversation**, not a pinned session or response. See the [consumer example and
 API contract](docs/extension-api.md) for lifecycle cleanup and limitations.
 
 Trusted launchers can opt into an advertised host Pi PID, private runtime, and

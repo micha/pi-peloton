@@ -74,6 +74,40 @@ test("outgoing cards update from sending to accepted without duplicating the mes
   assert.deepEqual(lines(call), ["PEER → Pi PID 23456 · steer · error", "Peer unavailable"]);
 });
 
+test("peer_send exposes only followUp and steer, with contrasting examples", () => {
+  const h = harness();
+  peloton(h.pi as unknown as ExtensionAPI);
+  const tool = h.tools[0];
+  const guidance = tool.promptGuidelines.join("\n");
+  assert.match(guidance, /delivery: "steer".*Example:.*Acknowledged;.*acknowledgement to proceed/);
+  assert.match(guidance, /delivery: "followUp".*can safely wait.*Example:.*After you finish your current run and yield.*separate review.*unrelated documentation/);
+  assert.deepEqual(tool.parameters.properties.delivery.anyOf.map((choice: { const: string }) => choice.const), ["followUp", "steer"]);
+  assert.ok(!tool.parameters.required.includes("delivery"));
+  for (const text of [tool.description, guidance]) assert.doesNotMatch(text, /nextTurn|human prompt|passive/);
+  assert.ok(tool.promptGuidelines.every((line: string) => line.includes("peer_send")));
+});
+
+test("peer_send guidance explains recipient yielding rather than tool or subtask completion", () => {
+  const h = harness();
+  peloton(h.pi as unknown as ExtensionAPI);
+  const tool = h.tools[0];
+  const guidance = tool.promptGuidelines.join("\n");
+  for (const text of [tool.description, guidance]) {
+    assert.match(text, /receiving agent yields \(ends its current run with a final response\)/);
+    assert.match(text, /tool or subtask/);
+    assert.doesNotMatch(text, /finish(?:es)? (?:its|your|the peer's) (?:current )?(?:turn|task)/);
+  }
+  assert.match(tool.description, /Default followUp wakes an idle peer/);
+  assert.match(tool.description, /not merely finishes a tool or subtask/);
+  assert.match(guidance, /Finishing a tool or subtask does not deliver it/);
+  assert.match(guidance, /receiver must yield, not the sender/);
+  assert.match(guidance, /idle receiver wakes immediately/);
+  assert.match(guidance, /newer steer messages may overtake it/);
+  assert.match(guidance, /design\/review findings needed during ongoing work, even if not urgent/);
+  assert.match(guidance, /yield by ending your current run with a final response instead of more tool calls/);
+  assert.match(guidance, /keeping your own run busy delays incoming follow-up delivery/);
+});
+
 test("extension lifecycle, delivery mapping, attribution, limits, literal commands and invalidation", async t => {
   const root = await mkdtemp(join(tmpdir(), "peloton-ext-"));
   const oldRuntime = process.env.XDG_RUNTIME_DIR;
@@ -106,11 +140,11 @@ test("extension lifecycle, delivery mapping, attribution, limits, literal comman
   assert.match(h.tools[0].description, /Replies arrive automatically/);
   const guidance = h.tools[0].promptGuidelines.join("\n");
   assert.match(guidance, /reply, finding, or correction.*next action.*delivery: "steer"/);
-  assert.match(guidance, /followUp when the message can wait/);
+  assert.match(guidance, /followUp" only if the message can safely wait until the receiving agent yields/);
   assert.match(guidance, /No polling or sleep loop/);
   assert.match(guidance, /continue independent work/i);
   assert.ok(h.tools[0].promptGuidelines.every((line: string) => line.includes("peer_send")));
-  assert.match(guidance, /finish the current turn/);
+  assert.match(guidance, /yield by ending your current run/);
   assert.match(guidance, /not declaring the task complete/);
   assert.equal(h.tools[0].parameters.properties.session, undefined);
   assert.equal(h.entries.filter(e => e.data.kind === "queued").length, 3);

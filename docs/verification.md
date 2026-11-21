@@ -332,6 +332,117 @@ simulated by the harness and a session replacement both clear blockers. The
 suite has 41 passing tests. Model use of the guard has not been verified in live
 collaboration.
 
+## Delivery-mode examples — guidance-only change
+
+The user reported an agent sending an acknowledgement as `nextTurn`, which
+remained accepted while peers continued exchanging steering messages. This is a
+user report, not a newly captured live trace. At that stage, the tool description
+and active-tool guidelines asserted human-prompt-only passive delivery and warned
+against it for active-exchange acknowledgements, answers, or needed coordination.
+Contrasting guideline examples illustrated all three modes. Those assertions were
+subsequently found too strong for Pi 1.6.0; see the corrective section below.
+Defaults, delivery behavior, and status visibility were unchanged.
+
+`npm run check`, `npm test` (**42 passing tests**, including the existing isolated
+synthetic RPC check), and `git diff --check` pass. Changed documentation links and
+assets were checked. A new harness test checks the mode-specific examples,
+human-prompt restriction, warning in both description and guidelines, and
+`peer_send` attribution in every guideline. These assertions verify guidance
+presence, not model compliance. No existing live peers or personal settings were
+changed; effectiveness against mode-selection mistakes still needs a live check
+after reload.
+
+## Busy follow-up trace review and yielding clarification — 2026-11-21
+
+With user authorization, a read-only inspection of the current native session
+JSONL records for Pi PIDs 3861161 and 3854393 covered entries through
+21:54:46 UTC. Both logged system prompts contained the delivery-mode examples
+above. Neither session used `nextTurn`. Five follow-ups from 3854393 reached
+3861161's transcript after its main completion report, about two to ten minutes
+after sending; newer steering messages had already been recorded. Subsequent
+assistant responses explicitly recognized delayed/outdated context. Three guarded
+sends were skipped with pending follow-up counts. These are independently
+inspected session-log observations, not a new live TUI smoke test, proof of task
+quality, or a controlled evaluation of guidance effectiveness. No messages were
+injected, sessions changed, or separate transcript copies created. The live Pi
+version was not independently established; this is not compatibility evidence.
+
+The follow-up description/guidelines now explain that a busy receiving agent
+must yield by ending its current run with a final response, not merely finish a
+tool or subtask. They distinguish recipient from sender yielding, retain idle
+wake-up, warn that newer steering can overtake follow-ups, and use a separate
+unrelated review as the follow-up example. Active design/review findings belong
+in steering even when nonurgent. Waiting/guard guidance uses the same definition
+of yielding. Defaults, delivery behavior, and status visibility are unchanged.
+
+`npm run check`, `npm test` (**43 passing tests**, including the existing isolated
+synthetic RPC check), and `git diff --check` pass. Changed documentation links and
+assets were checked. Regression assertions cover the revised examples,
+recipient-yield definition, idle behavior, overtaking, incoming-reply waiting,
+and absence of the old task/turn-completion wording. These verify guidance
+presence; model behavior after loading this latest clarification still needs
+observation. No personal settings or live peers were changed by implementation
+or automated checks.
+
+## Two-mode model tool and passive-delivery correction — 2026-11-21
+
+The earlier guidance's blanket claim that peer-triggered turns never deliver
+pending `nextTurn` messages was incorrect for Pi 1.6.0. Initial source review
+found that Pi 1.0.3 drains its passive queue on the user-prompt path, while the
+installed Pi 1.6.0 shares new-run preparation between user and custom-message
+starts. The isolated RPC probe below now independently confirms that difference;
+the old wording is retained above only as a historical account of the mistake.
+
+`peer_send` now exposes only `followUp` (unchanged default) and `steer`. Its
+schema excludes `nextTurn`; an execution check also rejects old/direct passive
+tool calls before sending, even if the pending-reply guard would otherwise skip
+them. No delivery substitution occurs. The extension API and wire retain passive
+mode, along with incoming and historical rendering. Model-tool guidance no longer
+teaches passive timing. No new status, task, scheduling, or discovery primitive
+was added, and no dependency versions changed.
+
+Automated checks: `npm run check`, `npm test` (**45 passing tests**), and
+`git diff --check` pass; changed documentation links/assets were checked. Harness
+assertions cover the two-choice tool schema/guidance, optional delivery/default,
+rejection without transport, delivery events, API send records, or backlog changes,
+rejection with a pending-reply guard, and API-only passive sends alongside normal
+tool sends.
+Existing transport/rendering/API tests continue to cover all three wire modes.
+
+The new `test/rpc.test.ts` passive-ordering probe uses the production extension,
+disposable processes/settings/runtime directories, native in-memory session
+entries inspected over RPC, and the existing deterministic offline provider. It
+does not call remote models, use credentials, or fabricate duplicate peer input.
+The ordinary suite uses the pinned Pi 1.0.3 CLI. A separate focused run against
+the installed Nix-packaged Pi 1.6.0 CLI also passed:
+
+| Check | Pi 1.0.3 | Pi 1.6.0 |
+| --- | --- | --- |
+| Enqueue passive context into idle recipient | Accepted, no peer recording/provider call | Accepted, no peer recording/provider call |
+| Next normal user prompt | User message → passive context → assistant | User message → passive context → assistant |
+| `followUp` wakes idle recipient | Waking message → assistant; passive context still queued | Waking message → passive context → assistant |
+| `steer` wakes idle recipient | Waking message → assistant; passive context still queued | Waking message → passive context → assistant |
+
+For the Pi 1.0.3 peer-wake cases, a subsequent user prompt records the original
+passive content exactly once, after the user message and before the response.
+For Pi 1.6.0 piggyback delivery, one provider call handles both waking and passive
+messages; passive context does not request an additional run. Cases start from
+fresh conversations, wait on native `agent_settled` events, and check cleanup.
+To repeat the focused probe with either exact version:
+
+```sh
+PI_PELOTON_TEST_CLI=/absolute/path/to/pi-coding-agent/dist/bundle/cli.js \
+  node_modules/.bin/tsx --test \
+  --test-name-pattern='isolated passive nextTurn ordering' test/rpc.test.ts
+```
+
+This is automated/synthetic evidence, not a new live TUI observation or a supported
+Pi version range. It does not cover busy-queue, retry/compaction, or pending-passive
+reload/session-switch interleavings across versions. Existing lifecycle/editor
+limits remain. No personal settings or existing live peers were changed. Agent
+behavior after removing the passive tool choice still needs observation; wording
+checks alone do not prove good mode selection or yielding.
+
 ## Automated checks
 
 At the prototype commit, `npm run check` and all 13 tests passed. The tests cover
