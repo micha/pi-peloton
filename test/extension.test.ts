@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm, lstat, chmod } from "node:fs/promises";
 import { createServer } from "node:net";
 import { once } from "node:events";
@@ -121,7 +122,20 @@ test("extension lifecycle, delivery mapping, attribution, limits, literal comman
     await rm(root, { recursive: true, force: true });
   });
   await assert.rejects(lstat(directory), { code: "ENOENT" }); // Factory starts no resources.
-  await h.emit("session_start");
+  assert.equal(h.entries.length, 0);
+  await h.emit("session_start", { reason: "startup" });
+  const { name, description, promptGuidelines, parameters } = h.tools[0];
+  const [runtime] = h.entries;
+  assert.equal(runtime.type, "custom");
+  assert.equal(runtime.customType, "peloton.runtime");
+  assert.equal(runtime.data.schemaVersion, 1);
+  assert.equal(runtime.data.wireVersion, VERSION);
+  assert.equal(runtime.data.reason, "startup");
+  assert.equal(runtime.data.identity.pid, process.pid);
+  assert.equal(runtime.data.peerSendDefinitionSha256, createHash("sha256")
+    .update(JSON.stringify({ name, description, promptGuidelines, parameters })).digest("hex"));
+  assert.equal(h.renderers.has(runtime.customType), false);
+  assert.equal(h.messages.length, 0);
   assert.equal(h.statuses.get("peloton"), `${process.pid} →0 ←0`);
   const sender = identity(12345);
   const client = new PeerClient(directory);

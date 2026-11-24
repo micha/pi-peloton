@@ -443,6 +443,22 @@ limits remain. No personal settings or existing live peers were changed. Agent
 behavior after removing the passive tool choice still needs observation; wording
 checks alone do not prove good mode selection or yielding.
 
+## Session revision metadata
+
+Unit tests cover Git HEAD, clean and dirty checkouts, linked worktrees, and a
+package without its own Git metadata. The extension harness checks the
+`peer_send` definition fingerprint against the registered tool and confirms the
+marker has no renderer or peer model message.
+
+The isolated Pi 1.0.3 RPC test reads the actual session JSONL and finds separate
+[startup and reload markers](implementation.md#session-revision-metadata) in the
+same file. It checks that reload preserves the process identity but changes the
+conversation generation, adds no model input, and starts no assistant turn. A
+new-session send matches the new marker's identity. The isolated startup and
+new-session marker checks in the passive-ordering probe passed on both Pi 1.0.3
+and 1.6.0. No live TUI sessions were reloaded or modified; earlier history is not
+backfilled. `npm run check` and `npm test` passed (47 tests).
+
 ## Automated checks
 
 At the prototype commit, `npm run check` and all 13 tests passed. The tests cover

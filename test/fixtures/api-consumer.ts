@@ -15,6 +15,10 @@ export default function (pi: ExtensionAPI) {
     for (const owner of routes.values()) owner.abort();
     routes.clear();
   });
+  pi.registerCommand("peloton-test-reload", {
+    description: "Reload the extensions in a disposable test process",
+    handler: async (_args, ctx) => { await ctx.reload(); },
+  });
   pi.registerCommand("peloton-test-route", {
     description: "Register an owned route in disposable test processes only",
     handler: async args => {

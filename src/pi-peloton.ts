@@ -1,9 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Type } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, SessionStartEvent } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Inbox } from "./inbox.ts";
-import { identity, deliveryOptions, safeText, messageKey, recordingUpdate, sameIdentity, isPid, isToken, LIMITS, type Envelope, type Identity, type Receipt, type RecordedUpdate } from "./protocol.ts";
+import { identity, deliveryOptions, safeText, messageKey, recordingUpdate, sameIdentity, isPid, isToken, LIMITS, VERSION, type Envelope, type Identity, type Receipt, type RecordedUpdate } from "./protocol.ts";
+import { readBuildRevision } from "./revision.ts";
 import { PeerServer, PeerClient } from "./transport.ts";
 import { startupConfiguration } from "./configuration.ts";
 import { PeerRouting, RouteError } from "./routing.ts";
@@ -18,6 +19,7 @@ const STATUS = "peloton.status";
 const DELIVERY = "peloton.delivery";
 const SENT = "peloton.sent";
 const SEND_RESULT = "peloton.send-result";
+const RUNTIME = "peloton.runtime";
 // Preserve process identity across extension reloads; no sockets/timers start here.
 const instanceKey = Symbol.for("pi-peloton.process-instance.v1");
 const processGlobals = globalThis as typeof globalThis & { [instanceKey]?: string };
@@ -244,7 +246,23 @@ export default function peloton(pi: ExtensionAPI) {
     context = undefined;
   };
 
-  pi.on("session_start", async (_event, ctx) => {
+  // Cache the checkout snapshot for this loaded factory, not for the process.
+  // New conversations may reuse the factory; a reload captures fresh metadata.
+  let buildRevision: ReturnType<typeof readBuildRevision> | undefined;
+  const recordRuntime = async (reason: SessionStartEvent["reason"], endpoint: Identity | null) => {
+    try {
+      pi.appendEntry(RUNTIME, {
+        schemaVersion: 1,
+        ...(await (buildRevision ??= readBuildRevision())),
+        wireVersion: VERSION,
+        peerSendDefinitionSha256,
+        reason,
+        identity: endpoint,
+      });
+    } catch { /* Missing provenance must not affect messaging. */ }
+  };
+
+  pi.on("session_start", async (event, ctx) => {
     await close();
     context = ctx;
     historical = new Set();
@@ -263,12 +281,14 @@ export default function peloton(pi: ExtensionAPI) {
     let config: ReturnType<typeof startupConfiguration>;
     try { config = startupConfiguration(); }
     catch (error) {
+      await recordRuntime(event.reason, null);
       report(error instanceof Error ? error : new Error(String(error)), true);
       await close();
       return;
     }
     const directory = config.runtimeDirectory;
     const recipient = identity(config.advertisedPid, instance);
+    await recordRuntime(event.reason, recipient);
     const nextInbox = new Inbox(recipient);
     active = recipient;
     inbox = nextInbox;
@@ -450,9 +470,8 @@ export default function peloton(pi: ExtensionAPI) {
     })),
   }, { additionalProperties: false });
 
-  pi.registerTool<typeof peerSendParameters, SendDetails | SkippedSendDetails>({
+  const peerSendDefinition = {
     name: "peer_send",
-    label: "Peer send",
     description: "Send attributed collaborator input to an already-prepared local Pi instance, targeting its Pi process PID (not tmux's shell PID). Default followUp wakes an idle peer; for a busy peer it waits until the receiving agent yields (ends its current run with a final response), not merely finishes a tool or subtask. Use explicit steer for messages that could change the peer's next action. Replies arrive automatically; if only waiting for one, yield by ending your current run with a final response instead of polling or sleeping. Acceptance does not mean read, replied, or completed. Does not reset sessions or grant permissions.",
     promptGuidelines: [
       "If a reply, finding, or correction could change the peer's next action, use peer_send with delivery: \"steer\". This includes design/review findings needed during ongoing work, even if not urgent. Example: \"Acknowledged; I'll leave that file to you.\" uses steer when the peer needs that acknowledgement to proceed.",
@@ -462,6 +481,13 @@ export default function peloton(pi: ExtensionAPI) {
       "When collaborating via peer_send, continue independent work when available. If only waiting for a peer response, yield by ending your current run with a final response instead of more tool calls, so queued follow-ups can be delivered and later follow-up replies can wake you. Ending the run is not declaring the task complete.",
     ],
     parameters: peerSendParameters,
+  };
+  // Hash the actual registered description, guidelines, and input schema so
+  // local edits can be distinguished even when the Git revision is the same.
+  const peerSendDefinitionSha256 = createHash("sha256").update(JSON.stringify(peerSendDefinition)).digest("hex");
+  pi.registerTool<typeof peerSendParameters, SendDetails | SkippedSendDetails>({
+    ...peerSendDefinition,
+    label: "Peer send",
     async execute(_id, params, signal) {
       const { skipIfPendingFromTarget, ...input } = params;
       // Fail closed for old/direct tool calls too; never silently change delivery.

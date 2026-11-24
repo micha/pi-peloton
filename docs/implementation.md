@@ -17,6 +17,7 @@ separate from the Pi version; mixed v1/v2 endpoints fail before sending content.
 | `src/protocol.ts` | Envelope/control types, validation, identities, limits, and safe text |
 | `src/transport.ts` | PID socket lookup, framed transport, handshakes, receipts, and endpoint cleanup |
 | `src/configuration.ts` | Strict trusted bootstrap parsing and process-local capture across reload |
+| `src/revision.ts` | Best-effort package and Git checkout provenance |
 | `src/routing.ts` | Session-scoped explicit routes, revocation, tombstones, and bounds |
 | `src/inbox.ts` | Admission tracking for accepted messages not yet recorded |
 | `src/recording.ts` | Outgoing correlations, recording observation, and serial notification queue |
@@ -201,6 +202,44 @@ Reload/session changes restart listeners, invalidate locally tracked pending
 messages, and cancel recording notifications. A context filter excludes stale or
 invalidated peer content while preserving recorded history. Pi owns the native
 queues: filtering cannot cancel a turn already scheduled by Pi.
+
+## Session revision metadata
+
+On each `session_start`, including startup, reload, and conversation switches,
+Peloton appends one `peloton.runtime` custom entry to the normal session. It has
+no renderer, does not enter the model context, and does not start a turn. No
+message content, source text, or filesystem paths are stored in it.
+
+| Data field (schema v1) | Meaning |
+| --- | --- |
+| `schemaVersion` | Version of this entry format; currently `1`. |
+| `packageVersion`, `wireVersion` | Package manifest version (or `null`) and Peloton wire protocol version, respectively. |
+| `revision`, `dirty` | Full Git HEAD and whether status shows tracked changes or nonignored untracked files (excluding submodules). Both are `null` if Git or checkout metadata is unavailable. |
+| `peerSendDefinitionSha256` | SHA-256 of the JSON definition registered by this runtime: tool name, description, prompt guidelines, and parameter schema. It distinguishes guidance/schema edits even when the Git HEAD is unchanged. It is not a hash of the whole extension or the final model prompt. |
+| `reason` | Pi's session-start reason (`startup`, `reload`, `new`, `resume`, or `fork`). |
+| `identity` | Local wire identity (`pid`, `instance`, `generation`) assigned for this start, or `null` when startup configuration is invalid. This does not prove that the listener bound successfully. |
+
+The checkout snapshot is best effort. Peloton reads it from the extension's own
+package directory at its first session-start event and keeps it for that loaded
+factory. Loading a new factory (e.g. `/reload`) takes a new snapshot. Git status
+is bounded and optional; a missing Git executable or a source export without
+`.git` does not affect messaging. A dirty HEAD is a base revision, not an exact
+source identification. The tool-definition fingerprint comes from the actual
+registration, not a later read of the checkout.
+
+For a read-only session review:
+
+```sh
+jq -c 'select(.type == "custom" and .customType == "peloton.runtime") | {timestamp, data}' /path/to/session.jsonl
+```
+
+Treat the records as lifecycle markers, not a single version for the whole
+file. Match `identity` to the local side of an envelope when available. For
+calls without an envelope, use the preceding lifecycle marker in chronological
+session records where it can be associated with that call. Pi can emit multiple
+starts during a single session replacement; each receives its own generation.
+Do not retroactively attribute pre-marker or unmarked history. Pi still decides
+when to create and flush session files; in-memory sessions do not write JSONL.
 
 ## Recording control updates
 

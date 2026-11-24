@@ -7,7 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import { PeerClient, PeerServer, socketPath } from "../src/transport.ts";
-import { identity, type RecordedUpdate } from "../src/protocol.ts";
+import { identity, VERSION, type RecordedUpdate } from "../src/protocol.ts";
 import type { PelotonConfiguration } from "../src/configuration.ts";
 
 const cli = resolve("node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js");
@@ -99,7 +99,9 @@ test("isolated Pi 1.0.3 API sends and native recording use advertised PID and dy
     install.stderr.on("data", chunk => diagnostics += chunk);
     assert.equal((await once(install, "exit"))[0], 0, diagnostics);
     assert.ok((await readFile(join(config, "settings.json"), "utf8")).includes(packagePath));
-    const child = spawn(process.execPath, [cli, "--mode", "rpc", "--no-session", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-builtin-tools", ...extraExtensions.flatMap(path => ["-e", path]), ...extraArgs], { cwd: root, env });
+    const child = spawn(process.execPath, [cli, "--mode", "rpc", "--session-dir", join(config, "sessions"),
+      "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-builtin-tools",
+      ...extraExtensions.flatMap(path => ["-e", path]), ...extraArgs], { cwd: root, env });
     children.push(child);
     const request = rpc(child);
     await request("get_state");
@@ -138,6 +140,9 @@ test("isolated Pi 1.0.3 API sends and native recording use advertised PID and dy
   assert.equal(state.isStreaming, false);
   const records = await b.request("get_entries");
   const queued = records.entries.find((entry: any) => entry.customType === "peloton.status" && entry.data.kind === "queued");
+  const [receiverRuntime] = records.entries.filter((entry: any) => entry.customType === "peloton.runtime");
+  assert.equal(receiverRuntime.data.reason, "startup");
+  assert.deepEqual(receiverRuntime.data.identity, queued.data.envelope.recipient);
   assert.equal(queued.data.envelope.sender.pid, a.child.pid);
   assert.equal(queued.data.envelope.delivery, "nextTurn");
   assert.equal(queued.data.envelope.id, apiResult.messageId);
@@ -197,6 +202,35 @@ test("isolated Pi 1.0.3 API sends and native recording use advertised PID and dy
     if (!reverseRecorded) await delay(20); // Recording control is asynchronous, not a model turn.
   }
   assert.equal(reverseRecorded, true);
+
+  // A real reload appends provenance to the existing session, without adding
+  // model content. The generation changes while PID and instance stay stable.
+  const { sessionFile } = await a.request("get_state");
+  const runtimesOnDisk = async () => (await readFile(sessionFile, "utf8")).trimEnd().split("\n")
+    .map(line => JSON.parse(line)).filter(entry => entry.customType === "peloton.runtime");
+  const initialRuntimes = await runtimesOnDisk();
+  assert.equal(initialRuntimes.length, 1);
+  const startup = initialRuntimes[0].data;
+  assert.equal(initialRuntimes[0].type, "custom");
+  assert.equal(startup.packageVersion, JSON.parse(await readFile(join(packagePath, "package.json"), "utf8")).version);
+  assert.equal(startup.wireVersion, VERSION);
+  assert.match(startup.peerSendDefinitionSha256, /^[0-9a-f]{64}$/);
+  const beforeMessages = (await a.request("get_messages")).messages;
+  assert.equal((await a.request("prompt", { message: "/peloton-test-reload" })).disposition, "handled");
+  const runtimes = await runtimesOnDisk();
+  assert.deepEqual(runtimes.map(entry => entry.data.reason), ["startup", "reload"]);
+  const reloaded = runtimes[1].data;
+  assert.equal(reloaded.identity.pid, startup.identity.pid);
+  assert.equal(reloaded.identity.instance, startup.identity.instance);
+  assert.notEqual(reloaded.identity.generation, startup.identity.generation);
+  assert.equal(reloaded.peerSendDefinitionSha256, startup.peerSendDefinitionSha256);
+  const afterMessages = (await a.request("get_messages")).messages;
+  assert.doesNotMatch(JSON.stringify(afterMessages), /peerSendDefinitionSha256/);
+  const assistantCount = (messages: any[]) => messages.filter(message => message.role === "assistant").length;
+  assert.equal(assistantCount(afterMessages), assistantCount(beforeMessages));
+  assert.equal((await a.request("get_state")).isStreaming, false);
+  // Reload clears dynamic routes; recreate the route for the revocation check.
+  await a.request("prompt", { message: `/peloton-test-route ${JSON.stringify({ target: b.address, directory: privateDirectory })}` });
   // Revocation on an ordinary host must tombstone, not fall back to its runtime.
   await a.request("prompt", { message: `/peloton-test-revoke ${b.address}` });
   await a.request("prompt", { message: `/peloton-test-send ${JSON.stringify({ target: b.address, content: "revoked" })}` });
@@ -211,6 +245,13 @@ test("isolated Pi 1.0.3 API sends and native recording use advertised PID and dy
   await a.request("prompt", { message: `/peloton-test-route ${JSON.stringify({ target: b.address, directory: privateDirectory })}` });
   await a.request("prompt", { message: `/peloton-test-send ${JSON.stringify({ target: b.address, content: "fresh sender", delivery: "nextTurn" })}` });
   const freshSender = (await a.request("get_entries")).entries;
+  // Pi's RPC rebinding can emit more than one start for a new conversation.
+  const freshRuntime = freshSender.filter((entry: any) => entry.customType === "peloton.runtime").at(-1).data;
+  const freshEnvelope = freshSender.filter((entry: any) => entry.customType === "peloton.send-result").at(-1).data.details.envelope;
+  assert.equal(freshRuntime.reason, "new");
+  assert.equal(freshRuntime.identity.instance, startup.identity.instance);
+  assert.notEqual(freshRuntime.identity.generation, reloaded.identity.generation);
+  assert.deepEqual(freshRuntime.identity, freshEnvelope.sender);
   assert.equal(freshSender.filter((entry: any) => entry.customType === "peloton.test-send").length, 2);
   assert.equal(freshSender.filter((entry: any) => entry.customType === "peloton.test-send").at(-1).data.ok, true);
   const freshTools = freshSender.find((entry: any) => entry.customType === "peloton.test-tools").data;
@@ -282,6 +323,11 @@ test("isolated passive nextTurn ordering under human and idle-peer wakeups", { t
     const passive = await client.send(sender, recipient, `passive context before ${trigger}`, "nextTurn");
     assert.equal((await request("get_state")).isStreaming, false);
     const before = (await request("get_entries")).entries;
+    const runtimeEntry = before.filter((entry: any) => entry.customType === "peloton.runtime").at(-1);
+    assert.equal(runtimeEntry.type, "custom");
+    assert.equal(runtimeEntry.data.reason, trigger === "human" ? "startup" : "new");
+    assert.deepEqual(runtimeEntry.data.identity, passive.envelope.recipient);
+    assert.match(runtimeEntry.data.peerSendDefinitionSha256, /^[0-9a-f]{64}$/);
     assert.equal(peerIndex(modelMessages(before), passive.envelope.id), -1);
     assert.equal(before.filter((entry: any) => entry.customType === "peloton.test-model").length, 0);
     let wakeId = "";
