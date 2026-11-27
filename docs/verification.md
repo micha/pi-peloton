@@ -400,29 +400,6 @@ of messages and recording controls awaiting acknowledgement.
 changed documentation links/assets were checked. No live TUI, personal settings,
 existing peers, or host Bubblewrap setup were used or changed.
 
-## Routine peer replies and approval
-
-A live session log showed a peer asking for direct confirmation after a request
-to report session-log metadata. It later answered a plain round-trip question in
-its own UI but declined to send the answer over Peloton, citing lack of direct
-authorization for a live test message. Both requests were recorded; the peer
-made no reply tool call. Its runtime marker still corresponded to the old
-guidance. The updated contributor instructions and tool guidance explicitly
-allow routine replies, including round-trip checks, without per-message
-confirmation. They do not grant permission for actions or disclosures that
-require separate approval. A harness test checks the guidance text, not model
-compliance.
-
-On 2026-11-27, after the user reloaded both Pis (90621 and 145446), an idle
-follow-up received one substantive `peer_send` reply without another human
-prompt. Both session logs showed the request and reply in opposite directions,
-with `replyTo` matching the request ID. The corresponding `peloton.runtime`
-markers showed dirty base `a3ae0ee` and the same updated tool-definition
-fingerprint (`ccf5db20…`). After the user started a fresh session in Pi 145446,
-a second message containing only “tell me a joke” also received a correlated
-reply, without an explicit reply instruction or a confirmation prompt. These
-checks do not establish that every model or workflow will follow the guidance.
-
 ## Automated checks
 
 At the prototype commit, `npm run check` and all 13 tests passed. The tests cover

@@ -55,16 +55,11 @@ status. Its details retain the envelope, recipient Pi session ID, and acceptance
 time. Peer input is never relabelled as a human message or interpreted as a slash
 command.
 
-The active-tool `promptGuidelines` say that routine coordination with prepared
-peers, including acknowledgements and round-trip replies, does not require human
-confirmation. Peer messages still cannot grant approval for actions or disclosures
-that require it.
-
-The tool description and guidelines recommend explicit steering for messages that
-could change the peer's next action, including nonurgent design/review findings
-needed during ongoing work. Busy follow-up waits until the receiving agent
-yields: ends its current run with a final response, not merely finishes a tool
-or subtask. The sender yielding does not deliver its
+The tool description and active-tool `promptGuidelines` recommend explicit
+steering for messages that could change the peer's next action, including
+nonurgent design/review findings needed during ongoing work. Busy follow-up waits
+until the receiving agent yields: ends its current run with a final response,
+not merely finishes a tool or subtask. The sender yielding does not deliver its
 outgoing messages. An idle recipient wakes immediately, and newer steering
 messages may overtake queued follow-ups.
 

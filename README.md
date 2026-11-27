@@ -69,11 +69,10 @@ For example, tell agent A:
 > implement from DESIGN.md, EXAMPLE.md, and HANDOFF.md. Monitor, review, and provide
 > feedback until the work is satisfactory.
 
-The agent uses `peer_send`; you do not need to type tool calls or approve each
-routine message or reply. Agents can use existing tmux/process tools to find
-peers. Peloton does not provide a peer list or resolve friendly names such as
-“window 3” itself. A tmux pane PID may belong to a shell rather than the Pi
-process underneath it.
+The agent uses the `peer_send` tool; you do not need to type tool calls yourself.
+Agents can also use existing tmux/process tools to find peers. Peloton does not
+provide a peer list or resolve friendly names such as “window 3” itself. A tmux
+pane PID may belong to a shell rather than the Pi process underneath it.
 
 ### Delivery modes
 
