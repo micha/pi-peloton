@@ -63,11 +63,6 @@ confirmation approves sending, not actions described by the text.
 ## Helper contract
 
 Exports and full TypeScript definitions live in [`src/api.ts`](../src/api.ts).
-Trusted extensions can also use `registerPeerRoute(events, { target, directory },
-{ signal, timeoutMs? })` to reach a newly launched private endpoint without
-rebinding Peloton. The required signal owns revocation; targets are one-shot per
-lifecycle and never fall back after revocation. This is not a model-facing send
-option. See the [bootstrap/private-routing contract](namespace-routing.md).
 
 ```ts
 sendPeerMessage(events, { target, content, delivery?, replyTo? }, { signal?, timeoutMs? }?)
@@ -77,6 +72,7 @@ onPeerDelivery(events, listener)
 ```
 
 - `target`: receiving **Pi process PID**, integer 1–2147483647, not a tmux shell PID.
+  Both processes must share the PID namespace and Peloton socket directory.
 - `content`: nonblank, at most 16 KiB UTF-8. Unknown input fields fail validation.
 - `delivery`: `followUp` by default; explicit `steer` has the
   [tool's semantics](../README.md#delivery-modes). The API additionally accepts

@@ -235,91 +235,17 @@ above remain. `npm ci --ignore-scripts` reports the existing pinned dependency
 advisories: 2 moderate and 1 high (including `minimatch` and `undici`); the target
 versions were not upgraded.
 
-## Trusted bootstrap and private routes — automated checks
+## Historical Bubblewrap experiment — removed
 
-`npm run check`, `npm test` (**40 passing tests**), and `git diff --check` pass
-with the pinned Pi 1.0.3 development dependencies. Changed local documentation
-links/assets were checked. No personal settings, existing peers, external
-credentials/providers, or live TUI sessions were used. Dependencies were not
-changed; the previously reported upstream advisories remain.
-
-`test/routing.test.ts` and `test/namespace-extension.test.ts` cover:
-
-- Complete/strict/versioned bootstrap validation, UTF-8/path/route bounds, duplicate
-  and self routes, advertised PID in socket/handshake/envelopes/footer/controls,
-  and explicit-only rejection without a default connection or inner-PID alias.
-- Invalid initial configuration disabling startup and changed/removed/malformed
-  established configuration failing visibly across lifecycle changes, never
-  resetting advertised identity or routing policy. Endpoint startup failures are
-  not hidden by the protocol-error UI rate limiter.
-- Post-start route registration, duplicate/full limits including tombstones,
-  caller-owned cancellation, pre-aborted calls creating nothing, lost-reply
-  revocation, helper deadlines, disposed buses, and reply-listener cleanup.
-- Active message and recording-control cancellation before acknowledgement,
-  cancellation during native-recording observation, queued control failure without
-  fallback, and revoked-target failure even under the ordinary default policy.
-- The shared client's process-replacement checks, no routed-directory creation,
-  socket/directory type/ownership/permission checks, and symlink rejection.
-- Shutdown clearing dynamic routes, no registration replay, stale ownership not
-  affecting a new lifecycle, stable process instance with rotated generation,
-  and old-generation recording rejection.
-
-The isolated Pi RPC test now also uses an explicit **synthetic advertised PID**
-and private runtime for one actual Pi 1.0.3 subprocess, plus a post-start dynamic
-route in the ordinary parent. Both load the production extension and public API
-consumer with `peer_send` inactive. API sends and native `peloton.peer` recording
-work **in both directions**, with matching recording metadata and reply-to. The
-parent's recording control back to the private child uses its dynamic route;
-the child's recording control back to the parent uses its bootstrap route.
-Revocation is not a fallback; a sender session replacement loses the dynamic
-registration until explicitly registered again. The configured child's session
-replacement preserves its advertised PID/instance, rotates generation, and
-recreates its static routes. Disposable endpoints/settings are cleaned up.
-
-This is automated/synthetic evidence. The RPC sessions are inspected via their
-native entry API, not a separate disk-session observer. It does **not** verify
-actual PID/user/mount namespaces, bubblewrap bootstrap/host-PID identification,
-read-only bind mounts or pinned-inode lifecycle behavior, Pi 1.5.2 compatibility,
-a production sidebar launcher, or live editor/focus/repaint behavior. Separate
-sidebar-repository probes must retain their own source snapshot/version and
-provenance; they are not implied by these 40 tests. Existing live/association and
-collaboration-quality gaps remain. See the [routing contract](namespace-routing.md).
-
-## Cross-repository namespace gate — collaborator report and source review
-
-The sidebar collaborator (Pi PID 526557) reports a passing explicit
-`npm run probe:pi-peloton` in the adjacent `pi-tmux-sidebar` checkout, using
-installed Pi 1.5.2, real bubblewrap namespaces, two disposable Pi processes, and
-deterministic offline providers. The evidence/method/limits and nine source
-SHA-256 hashes are recorded there in `docs/pi-peloton-probe.md` (not packaged
-with Peloton). All nine hashes were independently compared here with the current
-Peloton sources and match. The probe, consumer, bootstrap, provider, RPC observer,
-and PID/routing helpers were reviewed read-only; **this agent did not rerun that
-namespace fixture**.
-
-The reported runtime checks include public API sends and native session-file
-`peloton.peer`/`peloton.delivery` records in both directions, reply-to/host-PID
-attribution, inactive `peer_send`, dynamic parent routing without endpoint rebind,
-explicit-only child routing, monotonic statuses, and no extra sender provider call
-from API/status handling. Following source review, the collaborator strengthened
-and reportedly reran the fixture: each native session must contain only its
-expected `peloton.peer` custom model message, and all recording/delivery-status
-entries must explicitly have non-model `type: "custom"`. Those assertions were
-read back here, separately from the provider-call checks. Actual child session
-replacement preserves its advertised PID/instance and rotates generation. Parent route revocation tombstones the target;
-actual parent session replacement loses the dynamic route and leaves the child's
-per-file parent export pinned to the old inode, causing sends to fail without
-reconnection. A deliberate post-start failure reportedly exits nonzero with owned
-process/state cleanup and preservation of an unrelated sentinel checked by a
-separate wrapper.
-
-These are **collaborator-reported runtime observations plus local source/hash
-review**, not new independently executed checks in this repository. The
-fixture's pending/cancellation/reload interleavings must not be inferred from our
-separate Pi 1.0.3 tests or the older synthetic transport fixture. This one offline
-profile does not establish a supported Pi version range, a production launcher,
-automatic sidebar recreation, live popup/editor/focus behavior, remote-model
-consumption, application-association validation, or collaboration-quality benefit.
+Commit `e7f5cdb` added launcher-supplied identity configuration and revocable
+socket routes. Its tests used a synthetic advertised PID in isolated Pi 1.0.3
+RPC processes. Separately, the sidebar collaborator reported a passing real
+Bubblewrap probe with Pi 1.5.2, offline providers, native session-file recording
+in both directions, and route revocation and socket rebind checks. Peloton's
+source and hashes were reviewed here; the real namespace probe was not rerun in
+this repository. The evidence is archived in the sibling checkout at
+`pi-sidebar/archive/docs/pi-peloton-probe.md` and applies only to the recorded
+source snapshot, not the current extension. No production launcher was shipped.
 
 ## Opt-in send guard — automated check
 
@@ -458,6 +384,21 @@ new-session send matches the new marker's identity. The isolated startup and
 new-session marker checks in the passive-ordering probe passed on both Pi 1.0.3
 and 1.6.0. No live TUI sessions were reloaded or modified; earlier history is not
 backfilled. `npm run check` and `npm test` passed (47 tests).
+
+## Shared-runtime messaging after removing namespace support
+
+Peloton no longer accepts launcher PID overrides or custom socket routes. The
+isolated Pi 1.0.3 RPC test now exercises two disposable processes in the same
+runtime directory, addressed by their real PIDs. It checks API sends and native
+recording in both directions, `replyTo`, no extra sender model turn, reload,
+session replacement, and socket cleanup. Real RPC prompts drain the native
+passive queue; the fixture no longer re-injects a copy of the peer message.
+Transport tests retain rejection of unsafe paths and symlinks and cancellation
+of messages and recording controls awaiting acknowledgement.
+
+`npm run check`, `npm test` (**42 passing tests**), and `git diff --check` pass;
+changed documentation links/assets were checked. No live TUI, personal settings,
+existing peers, or host Bubblewrap setup were used or changed.
 
 ## Automated checks
 

@@ -82,14 +82,12 @@ intent, automated checks, independent live observations, and user reports.
 - `src/api.ts`: extension-integration types, process-local request/reply helper, status events.
 - `src/protocol.ts`: types, validation, identities, limits, safe text.
 - `src/transport.ts`: private Unix sockets, handshakes, frames, receipts, cleanup.
-- `src/configuration.ts`, `src/routing.ts`: trusted bootstrap and revocable private routes.
 - `src/inbox.ts`: inbound admission tracking.
 - `src/recording.ts`: bounded outgoing correlations and recording notifications.
 - `src/presentation.ts`: shared card headers.
 - `test/`: unit/integration tests and isolated RPC checks. Fixtures are test-only.
 - `docs/implementation.md`: contributor reference; keep it synchronized with code.
 - `docs/extension-api.md`: consumer contract/example and association/lifecycle limits.
-- `docs/namespace-routing.md`: advertised identity/bootstrap and private-route contract.
 - `docs/verification.md`: evidence, method, provenance, and untested cases.
 
 ## Pi integration constraints
@@ -132,14 +130,13 @@ intent, automated checks, independent live observations, and user reports.
 - Expose only the receiving Pi PID as the model-facing address. Keep socket paths
   and nonces internal. Validate observed process identities to reject known PID
   replacements; first contact means the current instance at that PID.
-- Launcher-supplied advertised host PID/routing is trusted configuration, not
-  discovery/authentication. Never rewrite process.pid or relax handshakes. Explicit
-  and retired routes must not fall back. Use the same client/policy for ordinary
-  sends and recording controls; abort owned routes at lifecycle boundaries.
+- Use `process.pid` for the local identity and the same socket directory for
+  ordinary sends and recording controls. Peers must share the PID namespace and
+  runtime directory; do not add identity overrides or custom routes.
 - Use `$XDG_RUNTIME_DIR/pi-peloton/<pid>.sock`, with the private
-  `~/.pi/peloton-runtime/` fallback. Enforce owner-only leaf directories/sockets,
-  short paths, and safe stale-file cleanup. Do not replace an active endpoint or
-  unrelated file.
+  `~/.pi/peloton-runtime/` fallback. Only listeners create the directory. Enforce
+  owner-only leaf directories/sockets, short paths, and safe stale-file cleanup.
+  Do not replace an active endpoint or unrelated file.
 - tmux pane PIDs may be shells. Use process inspection for agent-driven discovery.
   If a built-in resolver is added, scope it to the sender's tmux session, use
   stable pane IDs, and reject ambiguity.

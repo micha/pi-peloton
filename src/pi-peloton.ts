@@ -5,13 +5,10 @@ import { Box, Text } from "@earendil-works/pi-tui";
 import { Inbox } from "./inbox.ts";
 import { identity, deliveryOptions, safeText, messageKey, recordingUpdate, sameIdentity, isPid, isToken, LIMITS, VERSION, type Envelope, type Identity, type Receipt, type RecordedUpdate } from "./protocol.ts";
 import { readBuildRevision } from "./revision.ts";
-import { PeerServer, PeerClient } from "./transport.ts";
-import { startupConfiguration } from "./configuration.ts";
-import { PeerRouting, RouteError } from "./routing.ts";
+import { PeerServer, PeerClient, runtimeDirectory } from "./transport.ts";
 import { peerHeader, type CardStatus } from "./presentation.ts";
 import { Outgoing, RecordingNotifications, waitForRecording } from "./recording.ts";
-import { PELOTON_SEND, peerSendResultEvent, PELOTON_DELIVERY, PELOTON_ROUTE, peerRouteResultEvent,
-  type PeerRouteRequest, type PeerRouteResponse, type PeerRouteResult, type PeerSendInput, type PeerSendRequest,
+import { PELOTON_SEND, peerSendResultEvent, PELOTON_DELIVERY, type PeerSendInput, type PeerSendRequest,
   type PeerSendResponse, type PeerSendResult, type PeerSendErrorCode, type PeerDeliveryStatus } from "./api.ts";
 
 const MESSAGE = "peloton.peer";
@@ -61,8 +58,6 @@ export default function peloton(pi: ExtensionAPI) {
   let notifications: RecordingNotifications | undefined;
   let footerText: string | undefined;
   let stopRequests: (() => void) | undefined;
-  let stopRoutes: (() => void) | undefined;
-  let routing: PeerRouting | undefined;
   const requests = new Set<string>();
   const sends = new Map<string, { abort: AbortController; done: Promise<SendOutcome> }>();
 
@@ -152,20 +147,6 @@ export default function peloton(pi: ExtensionAPI) {
   };
 
   const listen = () => {
-    const sessionRouting = routing!;
-    stopRoutes = pi.events.on(PELOTON_ROUTE, data => {
-      const request = data as PeerRouteRequest | undefined;
-      if (!request || !isToken(request.requestId)) return;
-      let result: PeerRouteResult;
-      try {
-        sessionRouting.register(request.input, request.signal);
-        result = { ok: true, target: request.input.target };
-      } catch (error) {
-        result = { ok: false, error: { code: error instanceof RouteError ? error.code : "invalid_request",
-          message: safeText(error instanceof Error ? error.message : String(error)) } };
-      }
-      try { pi.events.emit(peerRouteResultEvent(request.requestId), { requestId: request.requestId, result } satisfies PeerRouteResponse); } catch {}
-    });
     stopRequests = pi.events.on(PELOTON_SEND, async data => {
       const request = data as PeerSendRequest | undefined;
       // Without a valid correlation ID there is no safe response destination.
@@ -216,14 +197,11 @@ export default function peloton(pi: ExtensionAPI) {
   const close = async () => {
     stopRequests?.();
     stopRequests = undefined;
-    stopRoutes?.();
-    stopRoutes = undefined;
     active = undefined;
-    routing?.close();
-    routing = undefined;
-    // Settle and journal old-conversation work before abandoning its context.
+    // Cancel notifications and let old-conversation sends settle and journal.
     for (const send of sends.values()) send.abort.abort();
-    await Promise.all([...sends.values()].map(send => send.done));
+    await Promise.all([notifications?.close(), ...Array.from(sends.values(), send => send.done)]);
+    notifications = undefined;
     requests.clear();
     for (const envelope of inbox?.close() ?? []) {
       const key = messageKey(envelope);
@@ -234,8 +212,6 @@ export default function peloton(pi: ExtensionAPI) {
     server = undefined;
     inbox = undefined;
     client = undefined;
-    await notifications?.close();
-    notifications = undefined;
     for (const discarded of outgoing.clear()) {
       deliveryStatus(discarded.envelope, "untracked", { lastStage: discarded.stage, reason: "lifecycle" });
     }
@@ -249,7 +225,7 @@ export default function peloton(pi: ExtensionAPI) {
   // Cache the checkout snapshot for this loaded factory, not for the process.
   // New conversations may reuse the factory; a reload captures fresh metadata.
   let buildRevision: ReturnType<typeof readBuildRevision> | undefined;
-  const recordRuntime = async (reason: SessionStartEvent["reason"], endpoint: Identity | null) => {
+  const recordRuntime = async (reason: SessionStartEvent["reason"], endpoint: Identity) => {
     try {
       pi.appendEntry(RUNTIME, {
         schemaVersion: 1,
@@ -278,27 +254,15 @@ export default function peloton(pi: ExtensionAPI) {
       }
     }
     recorded = new Set(historical);
-    let config: ReturnType<typeof startupConfiguration>;
-    try { config = startupConfiguration(); }
-    catch (error) {
-      await recordRuntime(event.reason, null);
-      report(error instanceof Error ? error : new Error(String(error)), true);
-      await close();
-      return;
-    }
-    const directory = config.runtimeDirectory;
-    const recipient = identity(config.advertisedPid, instance);
+    const directory = runtimeDirectory();
+    const recipient = identity(process.pid, instance);
     await recordRuntime(event.reason, recipient);
     const nextInbox = new Inbox(recipient);
     active = recipient;
     inbox = nextInbox;
-    const nextRouting = new PeerRouting(config);
-    routing = nextRouting;
-    const nextClient = new PeerClient(directory, target => nextRouting.resolve(target));
+    const nextClient = new PeerClient(directory);
     client = nextClient;
     notifications = new RecordingNotifications(async (update, signal) => {
-      const route = nextRouting.resolve(update.recipient.pid);
-      const workSignal = route.signal ? AbortSignal.any([signal, route.signal]) : signal;
       // Extension message_end precedes Pi's session append. Do not report
       // recorded until the matching entry is actually observable in this branch.
       await waitForRecording(() => active === recipient && ctx.sessionManager.getBranch().some(entry => {
@@ -307,8 +271,8 @@ export default function peloton(pi: ExtensionAPI) {
         const envelope = details?.envelope;
         return envelope?.id === update.id && sameIdentity(envelope.recipient, update.sender)
           && sameIdentity(envelope.sender, update.recipient);
-      }), workSignal);
-      return nextClient.sendRecorded(update, workSignal);
+      }), signal);
+      return nextClient.sendRecorded(update, signal);
     }, notificationFailed);
     server = new PeerServer(directory, recipient, envelope => {
       if (active !== recipient || context !== ctx) throw new Error("Recipient session changed");

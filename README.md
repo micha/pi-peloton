@@ -132,11 +132,6 @@ The API returns acceptance/errors; optional content-free events report later
 recording. A PID addresses the **current conversation**, not a pinned session or response. See the [consumer example and
 API contract](docs/extension-api.md) for lifecycle cleanup and limitations.
 
-Trusted launchers can opt into an advertised host Pi PID, private runtime, and
-explicit per-PID routes, including revocable post-launch routes. See the
-[bootstrap/routing contract](docs/namespace-routing.md). This does not provide a
-sandbox launcher; actual namespace integration needs separate verification.
-
 ## What you'll see
 
 The status line shows your Pi PID and tracked delivery backlog:
@@ -173,7 +168,9 @@ notification is lost or a peer exits, the card keeps its last observed state.
 
 ## Scope and safety
 
-- **Local, same-user communication only.** No network listener or remote peers.
+- **Local, same-user communication only.** Peers must share a PID namespace and
+  socket directory (`$XDG_RUNTIME_DIR/pi-peloton/`, or `~/.pi/peloton-runtime/`
+  if `XDG_RUNTIME_DIR` is unset). No network listener or remote peers.
 - **Prepare peers yourself.** Peloton does not start/reset their sessions, change
   models or thinking levels, launch subagents, or schedule work. Sending `/new`
   as message text does not execute a slash command.
@@ -211,7 +208,6 @@ npm test
 
 - [Verification record](docs/verification.md): tested behavior and remaining gaps.
 - [Extension API](docs/extension-api.md): programmatic sending and delivery events.
-- [Private routing](docs/namespace-routing.md): trusted launcher configuration and route lifetime.
 - [Implementation notes](docs/implementation.md): APIs, transport, limits, and
   lifecycle details.
 - [AGENTS.md](AGENTS.md): instructions for coding agents working on this repository.

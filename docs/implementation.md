@@ -16,9 +16,7 @@ separate from the Pi version; mixed v1/v2 endpoints fail before sending content.
 | `src/api.ts` | Exported process-local extension API types, bounded request/reply helper, and delivery subscription |
 | `src/protocol.ts` | Envelope/control types, validation, identities, limits, and safe text |
 | `src/transport.ts` | PID socket lookup, framed transport, handshakes, receipts, and endpoint cleanup |
-| `src/configuration.ts` | Strict trusted bootstrap parsing and process-local capture across reload |
 | `src/revision.ts` | Best-effort package and Git checkout provenance |
-| `src/routing.ts` | Session-scoped explicit routes, revocation, tombstones, and bounds |
 | `src/inbox.ts` | Admission tracking for accepted messages not yet recorded |
 | `src/recording.ts` | Outgoing correlations, recording observation, and serial notification queue |
 | `src/presentation.ts` | Shared card-header format |
@@ -159,30 +157,14 @@ the tool renderer's invalidation callback to refresh the existing row.
 
 ## Transport, identity, and lifecycle
 
-Sockets are named `<pi-pid>.sock` under `$XDG_RUNTIME_DIR/pi-peloton/`, falling back
-to `~/.pi/peloton-runtime/`. The leaf directory must be a real, owner-only
-directory; sockets are mode `0600`. Paths over 100 bytes fail clearly. There is no
-separate registry file: the handshake provides endpoint identity.
-
-Trusted launchers may supply `PI_PELOTON_CONFIG` v1 with an advertised host Pi PID,
-private runtime, and per-PID directory routes. The first valid source is captured
-at session startup and cannot change within the process. Invalid configuration
-or later source changes disable startup visibly, without falling back. Ordinary
-unconfigured startup keeps its existing PID/XDG defaults. See the complete
-[bootstrap/routing contract](namespace-routing.md); Peloton does not discover or
-authenticate the launcher-supplied host PID.
-
-`registerPeerRoute()` installs an owned dynamic route over `peloton:route:v1`;
-its required signal aborts active transports and recording-observation work on
-revocation. A revoked target remains a tombstone until the lifecycle ends. Route
-registration is one-shot, not endpoint replacement or readiness detection.
-Configured and dynamic routes share a 256-target bound, including tombstones.
-One `PeerClient` retains identity memory across default/explicit destinations and
-uses the same resolver for sends and recorded controls. Routed leaves are checked
-without directory creation, supporting existing read-only exports. Queued controls
-fail closed after revocation. Dynamic routes/listeners do not persist or replay;
-old ownership signals cannot affect a new lifecycle. Routing is outbound lookup,
-not an inbound-sender allowlist. No wire identity/correlation check is relaxed.
+Each Pi uses its `process.pid` for its wire identity. Sockets are named
+`<pi-pid>.sock` under `$XDG_RUNTIME_DIR/pi-peloton/`, falling back to
+`~/.pi/peloton-runtime/`. Peers must share this directory and the PID namespace.
+The listener creates the leaf directory; the client checks it without creating
+it. The leaf must be a real, owner-only directory; sockets are mode `0600`.
+Paths over 100 bytes fail clearly. There is no separate registry file: the
+handshake provides endpoint identity. Message sends and recording controls use
+the same client and socket directory.
 
 A process-instance nonce distinguishes PID replacements and survives extension
 reload within that process. A conversation-generation nonce changes with
@@ -217,7 +199,7 @@ message content, source text, or filesystem paths are stored in it.
 | `revision`, `dirty` | Full Git HEAD and whether status shows tracked changes or nonignored untracked files (excluding submodules). Both are `null` if Git or checkout metadata is unavailable. |
 | `peerSendDefinitionSha256` | SHA-256 of the JSON definition registered by this runtime: tool name, description, prompt guidelines, and parameter schema. It distinguishes guidance/schema edits even when the Git HEAD is unchanged. It is not a hash of the whole extension or the final model prompt. |
 | `reason` | Pi's session-start reason (`startup`, `reload`, `new`, `resume`, or `fork`). |
-| `identity` | Local wire identity (`pid`, `instance`, `generation`) assigned for this start, or `null` when startup configuration is invalid. This does not prove that the listener bound successfully. |
+| `identity` | Local wire identity (`pid`, `instance`, `generation`) assigned for this start. This does not prove that the listener bound successfully. |
 
 The checkout snapshot is best effort. Peloton reads it from the extension's own
 package directory at its first session-start event and keeps it for that loaded
@@ -288,8 +270,6 @@ Current constants live in `src/protocol.ts`:
 | Recent accepted packets for duplicate detection | 256 |
 | Recent local extension request IDs | 256 |
 | Extension-helper reply deadline, configurable | 6 seconds |
-| Explicit routes, including retired targets | 256 |
-| Trusted bootstrap JSON | 64 KiB |
 
 Identical duplicates return the original receipt; reusing an ID with changed
 fields fails. Eviction and listener restart lose transport duplicate history.

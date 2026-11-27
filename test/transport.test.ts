@@ -1,13 +1,13 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, lstat, chmod, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, lstat, chmod, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createConnection, createServer } from "node:net";
 import { once } from "node:events";
-import { identity, LIMITS, VERSION, validateEnvelope, deliveryOptions, safeText, type Envelope } from "../src/protocol.ts";
+import { identity, LIMITS, VERSION, validateEnvelope, deliveryOptions, safeText, recordingUpdate, type Envelope } from "../src/protocol.ts";
 import { Inbox } from "../src/inbox.ts";
-import { PeerServer, PeerClient, socketPath, runtimeDirectory, privateDirectory } from "../src/transport.ts";
+import { PeerServer, PeerClient, socketPath, runtimeDirectory } from "../src/transport.ts";
 
 async function fixture(t: TestContext) {
   const directory = await mkdtemp(join(tmpdir(), "peloton-"));
@@ -112,8 +112,22 @@ test("unknown, self, invalid target, unsafe path and active socket fail clearly"
   const file = socketPath(f.directory, 98765);
   await writeFile(file, "do not delete");
   await assert.rejects(new PeerServer(f.directory, identity(98765), () => {}).start(), /non-owned socket path/);
+  await assert.rejects(f.client.send(f.sender, 98765, "not a socket"), /Unsafe peer socket/);
   await chmod(f.directory, 0o755);
-  await assert.rejects(privateDirectory(f.directory), /owner-only/);
+  await assert.rejects(f.client.send(f.sender, f.recipient.pid, "unsafe directory"), /owner-only/);
+});
+
+test("client neither creates a missing runtime nor follows a symlink to a runtime or socket", async t => {
+  const f = await fixture(t);
+  const missing = join(f.directory, "missing");
+  const client = new PeerClient(missing);
+  await assert.rejects(client.send(f.sender, f.recipient.pid, "missing runtime"), { code: "ENOENT" });
+  await assert.rejects(lstat(missing), { code: "ENOENT" });
+  await symlink(f.directory, missing);
+  await assert.rejects(client.send(f.sender, f.recipient.pid, "symlink runtime"), /real, owner-only/);
+  await symlink(socketPath(f.directory, f.recipient.pid), socketPath(f.directory, 34567));
+  await assert.rejects(f.client.send(f.sender, 34567, "symlink socket"), /Unsafe peer socket/);
+  assert.equal(f.received.length, 0);
 });
 
 test("bounded pending inbox and invalidation", () => {
@@ -155,4 +169,31 @@ test("shutdown closes stalled connections and client reports lost acknowledgemen
   await chmod(path, 0o600);
   t.after(() => new Promise<void>(resolve => fake.close(() => resolve())));
   await assert.rejects(f.client.send(f.sender, 34567, "hello"), /disconnected/);
+});
+
+test("caller cancellation aborts messages and recording controls before acknowledgement", { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const peer = identity(34567);
+  const server = createServer(socket => {
+    socket.on("error", () => {});
+    socket.write(JSON.stringify({ type: "hello", version: VERSION, identity: peer }) + "\n");
+    socket.once("data", () => server.emit("packet")); // Intentionally withhold acknowledgement.
+  });
+  const path = socketPath(f.directory, peer.pid);
+  server.listen(path);
+  await once(server, "listening");
+  t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+  await chmod(path, 0o600);
+  const incoming = validateEnvelope({ version: VERSION, id: "pending", sender: peer, recipient: f.sender,
+    content: "incoming", delivery: "nextTurn" });
+  for (const control of [false, true]) {
+    const owner = new AbortController();
+    const received = once(server, "packet", { signal: AbortSignal.timeout(5000) });
+    const pending = control ? f.client.sendRecorded(recordingUpdate(incoming), owner.signal)
+      : f.client.send(f.sender, peer.pid, "pending", "followUp", { signal: owner.signal });
+    const rejected = assert.rejects(pending, /aborted.*acceptance may be unknown/);
+    await received;
+    owner.abort();
+    await rejected;
+  }
 });
